@@ -1,0 +1,10 @@
+# /etc/fstab — the file system table of this distribution.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The root filesystem is the GPT partition that build.sh labels
+# <slug>root; the name in the fstab is the same label. The EFI system
+# partition is not mounted by default: uncomment the second line when the
+# system needs /boot/efi.
+NAME=@SLUG@root / ffs rw 1 1
+#NAME=@SLUG@esp /boot/efi msdos rw 1 1

@@ -1,0 +1,61 @@
+Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+The boot transcript below is a NetBSD amd64 console capture, trimmed to the
+part the boot test looks at. It is used by tests/fixtures/fake-provider.sh
+as the canned serial log of the fake VM, and the "no login prompt" case is
+derived from it by cutting the transcript before the prompt.
+
+>> NetBSD/sparc64 boot [1.0] (Tue Jan  2 00:00:00 UTC 2024) (GENERIC.MP)
+
+Copyright (c) 1996-2024 The NetBSD Foundation, Inc.
+All rights reserved.
+
+This product includes software developed by the NetBSD Foundation, Inc.
+http://www.NetBSD.org/
+
+The current boot is from the NetBSD build tree at
+  /usr/src/obj.amd64/NetBSD-amd64/...
+built with  ``build.sh -U -m amd64 -O obj -T tools tools release''
+
+Kernel configuration ``GENERIC''
+root on wd0a
+rootfs type ffs
+...
+NetBSD 10.0 (GENERIC) #0: Thu Jan  1 00:00:00 UTC 2024
+...
+bootmem = 2097152 KB
+Copyright (c) 1996-2024 The NetBSD Foundation, Inc.  All rights reserved.
+
+[  0.000000] cpu0 at mainbus0: apid 0 (boot processor)
+[  0.000000] cpu0: x86-64 family 0x15 model 0x1 stepping 0x5
+[  0.100000] mainbus0 at bios0
+[  0.100000] cpu0 at mainbus0: apid 0 (boot processor)
+[  1.200000] ahc0 at pci0 dev 1 function 0: "Advanced Host Controller"
+[  1.300000] wd0 at ahc0 channel 0
+[  1.400000] uvm0 at 0xffffffffffffffff
+[  1.500000] nfs0 at 0xffffffffffffffff
+[  1.600000] wsm0 at 0xffffffffffffffff
+[  1.700000] pms0 at 0xffffffffffffffff
+[  2.100000] isa0 at mainbus0
+[  2.200000] pnp0 at isa0
+[  2.300000] com0 at pnp0
+[  2.400000] pnp1 at pnp0
+[  2.500000] wsdisplay0 at pnp1
+[  3.100000] fdc0 at isa0
+[  4.200000] uart0 at isa0
+[  5.100000] sd0 at uart0
+[  6.100000] root-on-disk
+[  6.200000] boot device: sd0a
+
+root-on-disk
+[  7.100000] init: opening `/etc/rc.conf'
+[  7.200000] init: running /etc/rc.d/rc
+[  7.300000] init: running /etc/rc.d/syslogd
+[  7.400000] init: running /etc/rc.d/sshd
+[  7.500000] init: running /etc/rc.d/ntpd
+[  8.100000] init: running /etc/rc.d/zfs
+[  8.200000] init: running /etc/rc.d/cron
+[  8.300000] init: running /etc/rc.d/sendmail
+[  8.400000] init: running /etc/rc.d/postfix
+[  9.100000] start netbsd, banner: NetBSD 10.0
+[  9.200000] login:

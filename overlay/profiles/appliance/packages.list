@@ -1,0 +1,12 @@
+# packages.list — appliance profile (headless).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Empty by design: overlay/base already installs the essentials (the
+# pkg_add tool, the trust store, bash). Add one package name per line to
+# grow the appliance, e.g.:
+#   htop
+#   tmux
+#
+# The ZFS data pool needs no package: zpool(8) and zfs(8) are part of the
+# NetBSD base.

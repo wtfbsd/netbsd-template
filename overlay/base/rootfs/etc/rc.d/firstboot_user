@@ -1,0 +1,275 @@
+#!/bin/sh
+#
+# firstboot_user — provision the operator user and their SSH keys on the
+# first boot.
+#
+# PROVIDE: firstboot_user
+# REQUIRE: FILESYSTEMS NETWORKING
+# BEFORE: LOGIN
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# build.sh locks root in the image (the stock distribution leaves it with
+# an EMPTY password), so the login account is provisioned on the first
+# boot. NetBSD has no KEYWORD "firstboot": the script runs once, guarded
+# by a sentinel file. build.sh touches the sentinel into the image
+# (/var/db/firstboot_user) and this script removes it when it is done, so
+# the account is created on the first boot only.
+#
+# The configuration is /etc/firstboot-user.conf (the path is overridable
+# with the firstboot_user_conf variable). It is read as KEY=value lines,
+# parsed one line at a time and NEVER sourced: the file is operator data
+# and may hold a crypt(3) password hash.
+#
+#   USERNAME=alice        ^[a-z_][a-z0-9_-]{0,31}$           (required)
+#   FULLNAME=Alice        no ':' and no control characters   (optional)
+#   SSH_KEY=ssh-...       one authorized_keys line, repeatable
+#   PASSWORD_HASH=$6$...  crypt(3) starting with $6$ or $2b$  (optional)
+#   WHEEL=yes|no          default yes
+#
+# NetBSD has no pw(8): the account is created with useradd(8), which
+# creates the home directory as well (-m), and the password hash is
+# applied with usermod(8). The keys are installed in the home directory
+# of the new user: the .ssh directory is 0700, the authorized_keys file
+# is 0600, and both belong to the user.
+#
+# Without a PASSWORD_HASH the password stays '*' (the useradd default),
+# so that SSH key login works. The account is deliberately NOT locked: a
+# locked account cannot ssh at all.
+#
+# The home directory is taken from the password database; the
+# firstboot_user_home variable overrides it.
+
+# The command of "start": the NetBSD rc.subr runs the function that
+# start_cmd names, and never calls <name>_start by itself.
+start_cmd="firstboot_user_start"
+
+name=firstboot_user
+rcvar=firstboot_user
+
+# the rc.subr of the system; the test suite points the script at its own
+# stand-in with the variable firstboot_user_rcsubr
+_rcsubr=${firstboot_user_rcsubr:-/etc/rc.subr}
+if [ -r "$_rcsubr" ]; then
+	. "$_rcsubr"
+else
+	# the NetBSD rc.subr is not there: the command of the argument is
+	# taken from ${rc_arg}_cmd, exactly as the rc.subr does it
+	load_rc_config() { :; }
+	run_rc_command() {
+		_a=${1:-}
+		case $_a in
+		start) _c=${start_cmd:-} ;;
+		stop) _c=${stop_cmd:-} ;;
+		restart) _c=${restart_cmd:-} ;;
+		reload) _c=${reload_cmd:-} ;;
+		status) _c=${status_cmd:-} ;;
+		*) _c=${onecmd:-} ;;
+		esac
+		[ -n "$_c" ] || return 0
+		$_c
+	}
+fi
+
+: ${firstboot_user:=NO}
+: ${firstboot_user_conf:="/etc/firstboot-user.conf"}
+: ${firstboot_user_sentinel:="/var/db/firstboot_user"}
+: ${firstboot_user_home:=""}
+load_rc_config $name
+
+note() { # note <message> — to the console and to syslog
+	echo "firstboot_user: $*"
+	logger -t firstboot_user "$*" 2> /dev/null || true
+}
+
+# user_exists <name> — is the account already in the password database?
+# NetBSD has no pw(8): the password database is the file itself.
+user_exists() { # user_exists <name>
+	[ -r /etc/passwd ] || return 1
+	grep -q "^$1:" /etc/passwd
+}
+
+firstboot_user_start() {
+	_conf=$firstboot_user_conf
+	_sentinel=$firstboot_user_sentinel
+	_user=''
+	_full=''
+	_keys=''
+	_nkeys=0
+	_hash=''
+	_wheel='yes'
+
+	if [ ! -e "$_sentinel" ]; then
+		# the sentinel is gone: the account was provisioned on an
+		# earlier boot
+		return 0
+	fi
+
+	if [ ! -f "$_conf" ]; then
+		echo 'firstboot_user: no first-boot user was provisioned.'
+		echo '  root is locked. To get a login account, do ONE of:'
+		echo '    * write the first-boot config /etc/firstboot-user.conf with'
+		echo '      USERNAME=<name> and SSH_KEY=<an authorized_keys line>, then reboot'
+		echo '    * write the same file from another console and run'
+		echo '      /etc/rc.d/firstboot_user start by hand'
+		return 0
+	fi
+
+	# pass 1: parse and validate EVERYTHING before touching the system
+	while IFS= read -r _l || [ -n "$_l" ]; do
+		case $_l in
+		'' | '#'*) continue ;;
+		[A-Z_]*=*) ;;
+		*)
+			note "not a KEY=value line: $_l"
+			return 1
+			;;
+		esac
+		_k=${_l%%=*}
+		_v=${_l#*=}
+		case $_k in
+		USERNAME)
+			if ! printf '%s\n' "$_v" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
+				note 'USERNAME must match ^[a-z_][a-z0-9_-]{0,31}$'
+				return 1
+			fi
+			_user=$_v
+			;;
+		FULLNAME)
+			case $_v in
+			*:*)
+				note 'FULLNAME may not contain ":"'
+				return 1
+				;;
+			esac
+			if [ -n "$(printf '%s' "$_v" | grep -E '[[:cntrl:]]')" ]; then
+				note 'FULLNAME may not contain control characters'
+				return 1
+			fi
+			_full=$_v
+			;;
+		SSH_KEY)
+			case $_v in
+			ssh-ed25519* | ssh-rsa* | ecdsa-sha2-nistp256* | ecdsa-sha2-nistp384* | ecdsa-sha2-nistp521* | sk-ssh-ed25519@openssh.com* | sk-ecdsa-sha2-nistp256@openssh.com*) ;;
+			*)
+				note 'SSH_KEY must be one authorized_keys line starting with ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521 or an sk-*@openssh.com type'
+				return 1
+				;;
+			esac
+			_keys="$_keys
+$_v"
+			_nkeys=$((_nkeys + 1))
+			;;
+		PASSWORD_HASH)
+			case $_v in
+			'$6$'* | '$2b$'*) ;;
+			*)
+				note 'PASSWORD_HASH must be a crypt(3) string starting with $6$ or $2b$'
+				return 1
+				;;
+			esac
+			_hash=$_v
+			;;
+		WHEEL)
+			case $_v in
+			yes | no) ;;
+			*)
+				note "WHEEL must be yes or no (got: $_v)"
+				return 1
+				;;
+			esac
+			_wheel=$_v
+			;;
+		*)
+			note "unknown key in $_conf: $_k"
+			return 1
+			;;
+		esac
+	done < "$_conf"
+
+	if [ -z "$_user" ]; then
+		note 'USERNAME is missing'
+		return 1
+	fi
+	if [ "$_nkeys" -lt 1 ] && [ -z "$_hash" ]; then
+		note 'at least one SSH_KEY line or a PASSWORD_HASH is required'
+		return 1
+	fi
+
+	# pass 2: apply
+	if ! user_exists "$_user"; then
+		# NetBSD has no pw(8): useradd(8) creates the account and,
+		# with -m, its home directory
+		set -- -m -s /bin/sh
+		if [ "$_wheel" = yes ]; then
+			set -- "$@" -G wheel
+		fi
+		set -- "$@" -c "${_full:-$_user}" "$_user"
+		if ! useradd "$@"; then
+			note "useradd $_user failed"
+			return 1
+		fi
+		note "created user $_user (shell /bin/sh, wheel=$_wheel)"
+	fi
+
+	if [ -n "$_hash" ]; then
+		# The hash is applied with usermod(8). NetBSD has no pw(8) and
+		# its chpass(1) is the editor based one, so the hash is the
+		# argument of the command: it is visible in the process table
+		# for as long as the command runs.
+		if usermod -p "$_hash" "$_user"; then
+			note "password hash applied to $_user"
+		else
+			note "usermod could not apply the password hash of $_user"
+			return 1
+		fi
+	else
+		# no hash: the password stays '*' (key-only login)
+		note "no PASSWORD_HASH: the password of $_user stays '*' (key-only login)"
+	fi
+
+	# the home directory: the one of the password database, unless the
+	# firstboot_user_home variable says otherwise
+	_home=$firstboot_user_home
+	if [ -z "$_home" ]; then
+		# /etc/passwd has 7 fields, the home directory is field 6
+		_home=$(awk -F: -v u="$_user" '$1 == u { print $6 }' /etc/passwd)
+		case $_home in
+		/*) ;;
+		*) _home="/home/$_user" ;;
+		esac
+	fi
+	if ! mkdir -p "$_home/.ssh"; then
+		note "cannot create $_home/.ssh"
+		return 1
+	fi
+	if chmod 700 "$_home/.ssh" &&
+		printf '%s\n' "${_keys#?}" > "$_home/.ssh/authorized_keys" &&
+		chmod 600 "$_home/.ssh/authorized_keys"; then
+		# the keys belong to the user; the chown needs root and the
+		# script runs as root on the console
+		chown "$_user" "$_home/.ssh" "$_home/.ssh/authorized_keys" 2> /dev/null || true
+		note "installed $_nkeys SSH key(s) for $_user at $_home/.ssh/authorized_keys"
+	else
+		note "failed to write $_home/.ssh/authorized_keys"
+		return 1
+	fi
+
+	if mv "$_conf" "$_conf.done" && chmod 600 "$_conf.done"; then
+		note "first-boot provisioning complete (conf moved to $_conf.done)"
+	else
+		note "could not move $_conf out of the way (user $_user is set up)"
+		return 1
+	fi
+
+	# the account exists: the sentinel goes away, so that the script does
+	# nothing on the next boot
+	if rm -f "$_sentinel"; then
+		note "removed the first-boot sentinel $_sentinel"
+	else
+		note "could not remove the first-boot sentinel $_sentinel"
+	fi
+	return 0
+}
+
+run_rc_command "$1"

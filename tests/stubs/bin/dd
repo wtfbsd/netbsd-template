@@ -1,0 +1,20 @@
+#!/bin/sh
+# tests/stubs/bin/dd — a stand-in for dd(1).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG and then hands the call to the
+# real dd, whose path the test harness puts in $STUB_REAL_DD. The real dd
+# writes the image, so a test can check both the logged offsets and the
+# bytes that landed in the image.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+printf '%s\n' "dd $*" >> "$STUB_LOG"
+
+if [ -n "${STUB_REAL_DD:-}" ] && [ -x "${STUB_REAL_DD}" ]; then
+	case ${STUB_REAL_DD} in
+	*/tests/stubs/*) exit 0 ;;
+	esac
+	exec "${STUB_REAL_DD}" "$@"
+fi

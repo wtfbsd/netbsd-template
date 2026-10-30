@@ -1,0 +1,57 @@
+#!/bin/sh
+# tests/stubs/bin/nbpwd_mkdb — a stand-in for nbpwd_mkdb(1), the password
+# database builder of the NetBSD tools directory.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG and creates the password database
+# files under the -d directory, so that a test can assert on the call and
+# on the result in the staged root.
+#
+# Only the options of pwd_mkdb(8) are accepted: -B -L -l -p -s -v -w and
+# the ones that take an argument, -c -d -u -V. Any other option is refused
+# with "illegal option", so that a build that hands the tool an option it
+# does not have is caught here and not on the build host.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+PROG=nbpwd_mkdb
+
+illegal() {
+	printf '%s: illegal option -- %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+needs_arg() {
+	printf '%s: option %s requires an argument\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+printf '%s\n' "nbpwd_mkdb $*" >> "$STUB_LOG"
+
+root=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-B | -L | -l | -p | -s | -v | -w)
+		shift
+		;;
+	-c | -d | -u | -V)
+		[ $# -ge 2 ] || needs_arg "$1"
+		if [ "$1" = -d ]; then
+			root=$2
+		fi
+		shift 2
+		;;
+	-*)
+		illegal "$1"
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+if [ -n "$root" ] && [ -d "$root/etc" ]; then
+	: > "$root/etc/pwd.db"
+	: > "$root/etc/pwd.dir"
+fi

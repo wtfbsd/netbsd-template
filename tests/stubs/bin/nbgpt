@@ -1,0 +1,211 @@
+#!/bin/sh
+# tests/stubs/bin/nbgpt — a stand-in for nbgpt(8), the GPT utility of the
+# NetBSD tools directory.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG and keeps the partition layout it
+# was given in a state file next to the image. "show" prints a listing in
+# the gpt(8) format — start, size, index and contents columns, with the
+# PMBR, the primary GPT header and the primary GPT table first — so that
+# the build's offset parsing is exercised on the real shape of the output.
+#
+# "create" never truncates the image: the image is written by dd(1) and
+# the GPT is written into it.
+#
+# The options of gpt(8) are accepted: the global ones -r -v -s -p, and
+# the ones of the subcommands create, add, show, label and destroy. The
+# global options are marked as unverified in the round report: they come
+# from the gpt(8) manual page, not from a run of the tool. Any other
+# option is refused with "illegal option", so that a build that hands the
+# tool an option it does not have is caught here and not on the build
+# host.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+PROG=nbgpt
+
+illegal() {
+	printf '%s: illegal option -- %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+needs_arg() {
+	printf '%s: option %s requires an argument\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+printf '%s\n' "nbgpt $*" >> "$STUB_LOG"
+
+# to_blocks <size> — a size like 64m as a count of 512-byte blocks
+to_blocks() {
+	_s=$1
+	_u=1
+	case $_s in
+	*[kK]) _u=1024; _s=${_s%?} ;;
+	*[mM]) _u=1048576; _s=${_s%?} ;;
+	*[gG]) _u=1073741824; _s=${_s%?} ;;
+	esac
+	case $_s in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	printf '%d\n' $((_s * _u / 512))
+}
+
+# the global options of gpt(8), before the subcommand
+while [ $# -gt 0 ]; do
+	case $1 in
+	-r | -v | -s | -p) shift ;;
+	-*) illegal "$1" ;;
+	*) break ;;
+	esac
+done
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case $cmd in
+create)
+	img=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-s)
+			[ $# -ge 2 ] || needs_arg "$1"
+			shift 2
+			;;
+		-f | -n | -r | -v | -p)
+			shift
+			;;
+		-*)
+			illegal "$1"
+			;;
+		*)
+			img=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$img" ] || exit 1
+	# the image is written by dd(1): it is never truncated here
+	[ -f "$img" ] || : > "$img"
+	: > "$img.gptstate"
+	;;
+add)
+	img=''
+	type=''
+	size=''
+	index=''
+	label=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-t)
+			[ $# -ge 2 ] || needs_arg "$1"
+			type=${2:-}
+			shift 2
+			;;
+		-s)
+			[ $# -ge 2 ] || needs_arg "$1"
+			size=${2:-}
+			shift 2
+			;;
+		-i)
+			[ $# -ge 2 ] || needs_arg "$1"
+			index=${2:-}
+			shift 2
+			;;
+		-l)
+			[ $# -ge 2 ] || needs_arg "$1"
+			label=${2:-}
+			shift 2
+			;;
+		-a | -b | -d | -f | -n | -r | -v | -p)
+			shift
+			;;
+		-*)
+			illegal "$1"
+			;;
+		*)
+			img=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$img" ] || exit 1
+	blocks=$(to_blocks "${size:-0}") || exit 1
+	printf '%s\t%s\t%s\t%s\n' "${index:-0}" "$type" "$blocks" "${label:-}" >> "$img.gptstate"
+	;;
+show)
+	img=''
+	for _a in "$@"; do
+		case $_a in
+		-p | -r | -v | -s) continue ;;
+		-*)
+			illegal "$_a"
+			;;
+		esac
+		img=$_a
+	done
+	[ -n "$img" ] || exit 1
+	state="$img.gptstate"
+	[ -f "$state" ] || exit 1
+	bytes=$(wc -c < "$img" | tr -d ' ')
+	sectors=$((bytes / 512))
+	{
+		printf 'Disk: %s %s bytes\n' "$img" "$bytes"
+		printf 'Sector size: 512 bytes, %s sectors\n' "$sectors"
+		printf '%12s %12s %6s  %s\n' start size index contents
+		printf '%12d %12d %6d  %s\n' 40 16 1 'PMBR'
+		printf '%12d %12d %6d  %s\n' 56 16 2 'Pri GPT header'
+		printf '%12d %12d %6d  %s\n' 72 512 3 'Pri GPT table'
+	} > "$img.gptshow"
+	cursor=584
+	while IFS='	' read -r index type blocks label; do
+		[ -n "$index" ] || continue
+		printf '%12d %12d %6d  %s\n' "$cursor" "$blocks" "$index" "${label:-$type}" >> "$img.gptshow"
+		cursor=$((cursor + blocks))
+	done < "$state"
+	sed 's/^/gpt-show: /' "$img.gptshow" >> "$STUB_LOG"
+	cat "$img.gptshow"
+	;;
+label)
+	img=''
+	label=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-l)
+			[ $# -ge 2 ] || needs_arg "$1"
+			label=${2:-}
+			shift 2
+			;;
+		-n | -r | -v) shift ;;
+		-*) illegal "$1" ;;
+		*)
+			img=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$img" ] || exit 1
+	[ -f "$img.gptstate" ] || exit 1
+	printf '%s\n' "$label" >> "$img.gptstate"
+	;;
+destroy)
+	img=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-f | -n | -p | -r | -v) shift ;;
+		-*) illegal "$1" ;;
+		*)
+			img=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$img" ] || exit 1
+	rm -f "$img.gptstate" "$img.gptshow"
+	;;
+*)
+	printf 'nbgpt: unknown subcommand: %s\n' "$cmd" >&2
+	exit 1
+	;;
+esac

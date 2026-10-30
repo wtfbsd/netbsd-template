@@ -1,0 +1,20 @@
+#!/bin/sh
+# tests/stubs/bin/tar — a stand-in for tar(1).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG and then hands the call to the
+# real tar, whose path the test harness puts in $STUB_REAL_TAR. Without
+# that variable the stub only logs, so that a test can see that a call was
+# made without extracting anything.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+printf '%s\n' "tar $*" >> "$STUB_LOG"
+
+if [ -n "${STUB_REAL_TAR:-}" ] && [ -x "${STUB_REAL_TAR}" ]; then
+	case ${STUB_REAL_TAR} in
+	*/tests/stubs/*) exit 0 ;;
+	esac
+	exec "${STUB_REAL_TAR}" "$@"
+fi

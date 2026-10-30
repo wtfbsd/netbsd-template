@@ -1,0 +1,48 @@
+#!/bin/sh
+# tests/stubs/bin/nbinstallboot — a stand-in for nbinstallboot(8).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG and creates the image file it was
+# asked to write, so that a test can assert on the boot block that the
+# build passed.
+#
+# Only the options of installboot(8) are accepted: -c -e -f -m -n -o -t
+# -v. Any other option is refused with "illegal option", so that a build
+# that hands the tool an option it does not have is caught here and not on
+# the build host.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+PROG=nbinstallboot
+
+illegal() {
+	printf '%s: illegal option -- %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+needs_arg() {
+	printf '%s: option %s requires an argument\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+printf '%s\n' "nbinstallboot $*" >> "$STUB_LOG"
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	-c | -e | -f | -n | -v)
+		shift
+		;;
+	-m | -o | -t)
+		[ $# -ge 2 ] || needs_arg "$1"
+		shift 2
+		;;
+	-*)
+		illegal "$1"
+		;;
+	*)
+		[ -f "$1" ] || : > "$1"
+		shift
+		;;
+	esac
+done
