@@ -1,0 +1,13 @@
+# packages.list — pkgsrc packages for every profile.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One pkgsrc package name per line; '#' starts a comment. build.sh installs
+# these into the staged root with pkg_add, so PKG_PATH must point at a
+# pkgsrc binary package repository (see README "Packages"). A profile adds
+# its own packages.list on top of this one.
+
+pkg_install          # the pkg_add tool itself; bootstrap it first from a
+                     # pkgsrc binary repository (see README "Packages")
+ca-certificates      # trust store for TLS (pkgsrc security/ca-certificates)
+bash                 # a friendlier shell for operators

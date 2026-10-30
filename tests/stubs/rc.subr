@@ -1,0 +1,81 @@
+#!/bin/sh
+# tests/stubs/rc.subr — a minimal stand-in for the NetBSD /etc/rc.subr.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The NetBSD rc.subr (etc/rc.subr of the NetBSD source tree) is a big
+# file. The rc.d scripts of this template use two of its functions:
+#
+#   load_rc_config <name>   read /etc/rc.conf and /etc/rc.conf.d/<name>
+#   run_rc_command <arg>    run the command of <arg>
+#
+# run_rc_command takes the command from the variable ${rc_arg}_cmd: the
+# variable start_cmd names the function that "start" runs. It never calls
+# <name>_start by itself: a script that wants "start" to do something has
+# to say so with start_cmd. This is the behaviour of the NetBSD rc.subr:
+#
+#   eval _cmd=\$${rc_arg}_cmd _precmd=\$${rc_arg}_precmd \
+#       _postcmd=\$${rc_arg}_postcmd
+#   if [ -n "$_cmd" ]; then
+#           ...
+#           eval $_cmd \"\${@}\"
+#
+# What this stub does NOT do, on purpose:
+#   - it does not set PATH: the test suite runs the stub tools from a
+#     temporary directory and needs them on the PATH
+#   - it does not override echo and printf: the NetBSD rc.subr does that
+#     to make the output of the rc.d scripts immediate
+#   - it does not look for a running process: no script of this template
+#     runs a daemon
+#   - it does not handle the "fast", "force" and "one" prefixes
+
+# checkyesno <var> — is the variable yes or no?
+checkyesno() {
+	eval _value=\$${1}
+	case $_value in
+	[Yy][Ee][Ss] | [Tt][Rr][Uu][Ee] | [Oo][Nn] | 1) return 0 ;;
+	[Nn][Oo] | [Ff][Aa][Ll][Ss][Ee] | [Oo][Ff][Ff] | 0) return 1 ;;
+	esac
+	return 2
+}
+
+# load_rc_config <name> — read /etc/rc.conf and /etc/rc.conf.d/<name>
+load_rc_config() {
+	_command=${1:-}
+	[ -n "$_command" ] || return 1
+	if [ -f /etc/rc.conf ]; then
+		. /etc/rc.conf
+	fi
+	if [ -f "/etc/rc.conf.d/$_command" ]; then
+		. "/etc/rc.conf.d/$_command"
+	fi
+	return 0
+}
+
+# run_rc_command <arg> — run the command of <arg>
+run_rc_command() {
+	rc_arg=${1:-}
+	[ -n "$rc_arg" ] || return 1
+	shift
+	case $rc_arg in
+	start) _cmd=${start_cmd:-} ;;
+	stop) _cmd=${stop_cmd:-} ;;
+	restart) _cmd=${restart_cmd:-} ;;
+	reload) _cmd=${reload_cmd:-} ;;
+	status) _cmd=${status_cmd:-} ;;
+	*) _cmd=${onecmd:-} ;;
+	esac
+	# The rcvar gate of the NetBSD rc.subr: a script whose rcvar is
+	# not enabled does nothing.
+	if [ -n "${rcvar:-}" ] && [ "$rc_arg" != rcvar ] && [ "$rc_arg" != skipstart ]; then
+		if ! checkyesno "$rcvar"; then
+			printf '%s: $%s is not enabled - see rc.conf(5).\n' "${0:-rc}" "$rcvar" >&2
+			return 1
+		fi
+	fi
+	# No ${rc_arg}_cmd: the NetBSD rc.subr falls back to its own default
+	# behaviour, which needs a command to run. This stub has none: the
+	# script has to name its own command.
+	[ -n "$_cmd" ] || return 0
+	$_cmd "$@"
+}

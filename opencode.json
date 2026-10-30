@@ -1,0 +1,17 @@
+{
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "agent": {
+    "builder": {
+      "description": "Builds the NetBSD distribution template: dry run first, real build only when asked.",
+      "mode": "subagent",
+      "prompt": "Read AGENTS.md and then follow .opencode/agent/builder.md."
+    },
+    "tester": {
+      "description": "Runs the test suite of the NetBSD distribution template and reports red and green.",
+      "mode": "subagent",
+      "prompt": "Read AGENTS.md and then follow .opencode/agent/tester.md."
+    }
+  }
+}

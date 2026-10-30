@@ -1,0 +1,37 @@
+# sshd_config — OpenSSH server configuration for the appliance profile.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# NetBSD's OpenSSH has no Include directive, so the overlay ships the
+# whole file. It is the stock NetBSD sshd_config with the login policy of
+# the appliance added: no root logins, no password logins. Keys are
+# provisioned by the operator after the first boot; none are stored here.
+
+Port 22
+AddressFamily any
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+SyslogFacility AUTH
+LogLevel INFO
+
+LoginGraceTime 30
+PermitRootLogin no
+StrictModes yes
+IgnoreRhosts yes
+HostbasedAuthentication no
+
+PubkeyAuthentication yes
+AuthorizedKeysFile	.ssh/authorized_keys
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+UsePAM yes
+
+AllowAgentForwarding no
+AllowTcpForwarding yes
+X11Forwarding no
+PrintMotd no
+
+Subsystem	sftp	/usr/libexec/sftp-server

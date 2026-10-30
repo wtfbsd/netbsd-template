@@ -1,0 +1,54 @@
+#!/bin/sh
+# tests/stubs/bin/pkg_add — a stand-in for the pkgsrc pkg_add(1).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv and the environment that matters to the
+# installation to $STUB_LOG and creates the destination directory it was
+# given, so that a test can assert on the destination and on the
+# PKG_RCD_SCRIPTS setting.
+#
+# Only the options of pkg_add(1) are accepted: -A -f -I -K -m -n -P -p
+# -R -U -u -V -v. Any other option is refused with "illegal option", so
+# that a build that hands the tool an option it does not have is caught
+# here and not on the build host.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+PROG=pkg_add
+
+illegal() {
+	printf '%s: illegal option -- %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+needs_arg() {
+	printf '%s: option %s requires an argument\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+printf '%s\n' "pkg_add PKG_RCD_SCRIPTS=${PKG_RCD_SCRIPTS:-<unset>} $*" >> "$STUB_LOG"
+
+dest=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-P)
+		[ $# -ge 2 ] || needs_arg "$1"
+		dest=$2
+		shift 2
+		;;
+	-A | -f | -I | -K | -m | -n | -p | -R | -U | -u | -V | -v)
+		shift
+		;;
+	-*)
+		illegal "$1"
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+if [ -n "$dest" ]; then
+	mkdir -p "$dest"
+fi

@@ -1,0 +1,203 @@
+#!/bin/sh
+#
+# examplebsd-pool-create — create the ZFS data pool of this distribution.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# NetBSD cannot boot from ZFS: the root filesystem stays FFS and the pool
+# below is a data pool only.
+#
+# The pool is NOT created at build time and NOT at first boot: the disk it
+# lives on is the operator's choice. The command prints what it would do
+# and changes nothing until --yes is given.
+#
+# usage: examplebsd-pool-create [--yes] [--force] DEVICE
+#
+#   --yes, -y   actually create the pool (without it, only the plan is
+#               printed)
+#   --force, -f create the pool even when the device carries labels
+#
+#   DEVICE      the disk the pool is created on, e.g. /dev/wd1d (a
+#               partition of an IDE disk) or /dev/dk2 (a wedge)
+#
+# The pool name is the one from the product configuration; build.sh
+# substitutes the placeholder below.
+#
+# The device is checked three times before anything is written to it:
+#
+#   - it must not be on the disk that holds the running root: the root
+#     wedge and the device are both resolved to their parent disk, so
+#     that every partition and every wedge of that disk is refused as
+#     well
+#   - the parent disk must not carry a GPT partition table: the wedges
+#     of a disk are its partitions
+#   - the first mebibyte of the device must be zeros: a device that
+#     carries anything is refused, unless --force is given
+
+set -eu
+
+POOL='@ZFS_POOL_NAME@'
+ASSUME_YES=0
+FORCE=0
+
+usage() {
+	printf 'usage: %s [--yes] [--force] DEVICE\n' "$0" >&2
+	exit "${1:-2}"
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--yes | -y) ASSUME_YES=1 ;;
+	--force | -f) FORCE=1 ;;
+	-h | --help)
+		usage 0
+		;;
+	-*) usage ;;
+	*) break ;;
+	esac
+	shift
+done
+
+[ $# -eq 1 ] || usage
+DEVICE=$1
+
+die() {
+	printf '%s: %s\n' "$0" "$*" >&2
+	exit 1
+}
+
+[ -n "$POOL" ] || die 'this build has no ZFS data pool configured'
+
+# only root may create a pool
+[ "$(id -u)" -eq 0 ] || die 'this command must be run as root'
+
+command -v zpool > /dev/null 2>&1 || die 'zpool(8) is not in this system'
+
+# dev_name <device> — the device name without its /dev/ prefix
+dev_name() {
+	printf '%s\n' "${1#/dev/}"
+}
+
+# wedge_parent <dkN> — the disk a wedge belongs to
+# dkctl(8) prints "<wedge> at <parent>: <name>" and then a line with the
+# size of the wedge. The shape of that output comes from the source of
+# dkctl(8), not from a run of the tool.
+wedge_parent() {
+	_out=$(dkctl "$1" getwedgeinfo 2> /dev/null | head -1)
+	[ -n "$_out" ] || return 1
+	_p=$(printf '%s\n' "$_out" | awk '{ print $3 }' | sed 's/:$//')
+	case $_p in
+	'' | *[!A-Za-z0-9_-]*) _p='' ;;
+	esac
+	if [ -z "$_p" ]; then
+		# the output has another shape: look for the name of a disk
+		_p=$(printf '%s\n' "$_out" | tr ':' ' ' |
+			awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(cd|fd|hd|ld|nvd|sd|wd|xvd)[0-9]+$/) { print $i; exit } }')
+	fi
+	[ -n "$_p" ] || return 1
+	printf '%s\n' "$_p"
+}
+
+# parent_disk <device> — the whole disk a device belongs to
+parent_disk() { # parent_disk <device>
+	_n=$(dev_name "$1")
+	case $_n in
+	dk[0-9]*)
+		# a wedge: the disk it was created on
+		wedge_parent "$_n"
+		;;
+	*[a-z])
+		# a partition of a disk (wd0a); a whole disk does not end in
+		# a letter
+		printf '%s\n' "${_n%?}"
+		;;
+	*)
+		printf '%s\n' "$_n"
+		;;
+	esac
+}
+
+# dev_is_block <device> — is this a block device?
+dev_is_block() {
+	[ -b "$1" ] && return 0
+	# stat(1) is asked as well, so that the check also works where the
+	# device node is not visible to the test suite
+	case $(stat -c '%F' "$1" 2> /dev/null) in
+	'block special file') return 0 ;;
+	esac
+	case $(stat -f '%HT' "$1" 2> /dev/null) in
+	'block device') return 0 ;;
+	esac
+	return 1
+}
+
+# device_is_blank <device> — is the first mebibyte of the device zero?
+# A device that carries a label, a file system or anything else is not
+# blank. disklabel(8) is not asked for that: on a blank disk it prints a
+# label of its own and exits with 0, so it cannot tell the two apart.
+device_is_blank() { # device_is_blank <device>
+	[ -r "$1" ] || return 1
+	_n=$(dd if="$1" bs=1048576 count=1 2> /dev/null |
+		od -An -v -tx1 | tr -d ' \n' | tr -d '0' | wc -c)
+	[ "$_n" -eq 0 ]
+}
+
+# the disk that holds the running root is never a candidate: the pool
+# would eat the system it is running from. The root wedge and the device
+# are resolved to their parent disk, so that every partition and every
+# wedge of that disk is refused as well.
+rootdev=$(sysctl -n kern.root_device 2> /dev/null || printf '')
+if [ -n "$rootdev" ]; then
+	_rootdisk=$(parent_disk "$rootdev" || printf '')
+	_targetdisk=$(parent_disk "$DEVICE" || printf '')
+	if [ -n "$_rootdisk" ] && [ "$_rootdisk" = "$_targetdisk" ]; then
+		die "$DEVICE is on $_rootdisk, the disk that holds the running root filesystem ($rootdev); it is never a candidate"
+	fi
+fi
+
+# the pool must not be created on top of something that is already there:
+# a disk with a GPT partition table has wedges, and the wedges are its
+# partitions. The check runs on the parent disk.
+#
+# gpt(8) exits with 0 on a blank disk and prints the map of the free
+# space ("Unused"), so the exit status says nothing about the disk: the
+# decision comes from the output, which holds the rows of the GPT header
+# only when the disk carries a partition table.
+_parent=$(parent_disk "$DEVICE" || printf '')
+if [ -n "$_parent" ] && command -v gpt > /dev/null 2>&1; then
+	_gpt=$(gpt show "/dev/$_parent" 2> /dev/null || printf '')
+	case $_gpt in
+	*'Pri GPT header'*)
+		die "$_parent has a GPT partition table; it is never a candidate"
+		;;
+	esac
+fi
+
+# the device itself has to be blank
+if [ "$FORCE" -ne 1 ] && ! device_is_blank "$DEVICE"; then
+	die "$DEVICE is not blank (its first mebibyte is not zero); use --force to overwrite it"
+fi
+
+if zpool list -H "$POOL" > /dev/null 2>&1; then
+	die "the pool $POOL already exists"
+fi
+
+dev_is_block "$DEVICE" || die "$DEVICE is not a block device"
+
+printf 'plan: create the ZFS data pool %s on %s\n' "$POOL" "$DEVICE"
+if [ "$FORCE" -eq 1 ]; then
+	printf '  the pool is created with -f: the labels on the device are overwritten\n'
+fi
+
+if [ "$ASSUME_YES" -ne 1 ]; then
+	printf 'nothing was changed. Run this again with --yes to create the pool.\n'
+	exit 0
+fi
+
+if [ "$FORCE" -eq 1 ]; then
+	zpool create -f "$POOL" "$DEVICE"
+else
+	zpool create "$POOL" "$DEVICE"
+fi
+
+zpool status "$POOL"

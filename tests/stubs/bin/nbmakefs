@@ -1,0 +1,63 @@
+#!/bin/sh
+# tests/stubs/bin/nbmakefs — a stand-in for nbmakefs(1).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The stub appends its argv to $STUB_LOG, creates the image file it was
+# asked to write and copies the metadata spec (-F) into the log, so that
+# a test can assert on what the real build asked the tool to do.
+#
+# Only the options of makefs(8) are accepted: -B -b -d -F -f -M -m -N
+# -O -o -R -S -s -T -t -x -Z. Any other option is refused with
+# "illegal option", so that a build that hands the tool an option it does
+# not have is caught here and not on the build host.
+
+: "${STUB_LOG:?STUB_LOG must point at the stub log}"
+
+PROG=nbmakefs
+
+illegal() {
+	printf '%s: illegal option -- %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+needs_arg() {
+	printf '%s: option %s requires an argument\n' "$PROG" "$1" >&2
+	exit 1
+}
+
+printf '%s\n' "nbmakefs $*" >> "$STUB_LOG"
+
+spec=''
+image=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-x | -Z)
+		shift
+		;;
+	-B | -b | -d | -F | -f | -M | -m | -N | -O | -o | -R | -S | -s | -T | -t)
+		[ $# -ge 2 ] || needs_arg "$1"
+		case $1 in
+		-F) spec=$2 ;;
+		esac
+		shift 2
+		;;
+	-*)
+		illegal "$1"
+		;;
+	*)
+		if [ -z "$image" ]; then
+			image=$1
+		fi
+		shift
+		;;
+	esac
+done
+
+if [ -n "$image" ]; then
+	: > "$image"
+fi
+
+if [ -n "$spec" ] && [ -f "$spec" ]; then
+	sed 's/^/metalog: /' "$spec" >> "$STUB_LOG"
+fi

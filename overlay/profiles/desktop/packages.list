@@ -1,0 +1,16 @@
+# packages.list — desktop profile (X11 only, no Wayland anywhere).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Fixed set: the X11 server, Xfce and the LightDM greeter, all from
+# pkgsrc. build.sh installs these together with overlay/base/packages.list.
+#
+# The release's own X11 set is not unpacked into the image, so that the
+# desktop has exactly one X11 in it (the pkgsrc one).
+
+xorg-server          # the X11 server (pkgsrc x11/xorg-server)
+xf86-input-libinput  # pointer and keyboard input driver
+xfce4                # the desktop environment (pkgsrc x11/xfce4)
+lightdm              # the display manager (pkgsrc x11/lightdm)
+lightdm-gtk-greeter  # the greeter (pkgsrc x11/lightdm-gtk-greeter)
+dbus                 # the message bus (pkgsrc devel/dbus)

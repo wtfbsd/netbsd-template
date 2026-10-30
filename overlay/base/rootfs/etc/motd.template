@@ -1,0 +1,12 @@
+@DISTRO_NAME@ — an overlay distribution on unmodified NetBSD base.
+
+@MOTD@
+
+  * Built with the stock NetBSD tooling: no patched src/, no patched pkgsrc.
+  * Third-party software comes from pkgsrc; the base system is the real thing.
+  * The root filesystem is FFS; ZFS is available for data pools only.
+
+  Docs:    @BRAND_URL@
+
+  Try:  pkg_add -u bash     # update a package
+        zpool list          # the ZFS data pools of this system
