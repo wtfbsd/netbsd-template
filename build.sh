@@ -39,7 +39,7 @@
 #   -n  dry run: validate the config, print the plan, change nothing
 #
 # Environment knobs:
-#   ROOTSIZE  size of the root filesystem (default 12G)
+#   ROOTSIZE  size of the root filesystem (default 12g)
 #   ESPSIZE   size of the EFI system partition (default 64m)
 #   DISKSIZE  size of the raw disk image (default: ROOTSIZE + 256m)
 #   PKG_PATH  pkgsrc binary package repository used by pkg_add
@@ -58,12 +58,18 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 usage() {
 	log "usage: $PROG -c product.conf [-s /usr/src] [-o ./out]"
-	log '       [-p desktop|appliance|both] [-n]'
+	log '       [-p desktop|appliance|both] [-u USER -k PUBKEYFILE] [-H HASHFILE] [-n]'
 	log ''
 	log '  -c  product.conf from wtfbsd/agents scripts/apply-answers.sh'
 	log '  -s  unmodified NetBSD src tree (default /usr/src)'
 	log '  -o  output directory (default ./out)'
 	log '  -p  profile: desktop, appliance or both (default: product.conf PROFILE)'
+	log '  -u  + -k  bake /etc/firstboot-user.conf (mode 0600): USERNAME=USER'
+	log '           with one SSH_KEY= line per non-empty, non-comment line of'
+	log '           the PUBKEYFILE; -u and -k are required together'
+	log '  -H  hash file: one NetBSD pwhash(1) hash per non-empty, non-comment'
+	log '       line, added as PASSWORD_HASH= (needs -u; the password hash must'
+	log '       be $2a$ or $argon2id$). The profile is -p, not -H.'
 	log '  -n  dry run: print the plan, change nothing'
 	exit "${1:-2}"
 }
@@ -73,13 +79,19 @@ CONF=''
 SRC=/usr/src
 OUT=./out
 CHOSEN=''
+BAKE_USER=''
+BAKE_KEYFILE=''
+BAKE_HASHFILE=''
 
-while getopts 'c:s:o:p:nh' _opt; do
+while getopts 'c:s:o:p:u:k:H:nh' _opt; do
 	case $_opt in
 	c) CONF=$OPTARG ;;
 	s) SRC=$OPTARG ;;
 	o) OUT=$OPTARG ;;
 	p) CHOSEN=$OPTARG ;;
+	u) BAKE_USER=$OPTARG ;;
+	k) BAKE_KEYFILE=$OPTARG ;;
+	H) BAKE_HASHFILE=$OPTARG ;;
 	n) DRY=1 ;;
 	h) usage 0 ;;
 	*) usage 2 >&2 ;;
@@ -225,6 +237,55 @@ case $_rc in
 *) die "overlay guard: could not scan $ROOT/overlay (grep exit $_rc)" ;;
 esac
 
+# optional -u/-k/-H: bake /etc/firstboot-user.conf (mode 0600) into the
+# staged image. USERNAME=USER, one SSH_KEY= line per non-empty, non-comment
+# line of the PUBKEYFILE, and one PASSWORD_HASH= per non-empty, non-comment
+# line of the HASHFILE. The validation is identical to the one
+# rc.d/firstboot_user does at boot, so a bad line is refused here, in the
+# dry run too, before anything is built. Without -u the conf has no USERNAME.
+if [ -n "$BAKE_USER" ] || [ -n "$BAKE_KEYFILE" ] || [ -n "$BAKE_HASHFILE" ]; then
+	# -u and -k are a required pair.
+	[ -n "$BAKE_USER" ] && [ -n "$BAKE_KEYFILE" ] || \
+		die 'build.sh: -u USER and -k PUBKEYFILE must be given together'
+	chk '^[a-z_][a-z0-9_-]{0,31}$' "$BAKE_USER" 'build.sh: -u: bad username'
+	[ -f "$BAKE_KEYFILE" ] || die "build.sh: no such pubkey file: $BAKE_KEYFILE"
+	_nkeys=0
+	_n=0
+	while IFS= read -r _kl || [ -n "$_kl" ]; do
+		_n=$((_n + 1))
+		case $_kl in '' | '#'*) continue ;; esac
+		case $_kl in
+		ssh-ed25519* | ssh-rsa* | ecdsa-sha2-nistp256* | ecdsa-sha2-nistp384* | \
+		ecdsa-sha2-nistp521* | sk-ssh-ed25519@openssh.com* | \
+		sk-ecdsa-sha2-nistp256@openssh.com*) ;;
+		*) die "build.sh: $BAKE_KEYFILE: line $_n is not a supported ssh public key" ;;
+		esac
+		_nkeys=$((_nkeys + 1))
+	done < "$BAKE_KEYFILE"
+	[ "$_nkeys" -gt 0 ] || die "build.sh: no ssh public key lines in $BAKE_KEYFILE"
+	# -H: a file of one or more NetBSD pwhash(1) hash lines. The profile is
+	# -p, so the hash flag is -H. The hash sets the password of the user, so
+	# it needs -u, which the pair above already guarantees.
+	if [ -n "$BAKE_HASHFILE" ]; then
+		[ -f "$BAKE_HASHFILE" ] || die "build.sh: no such hash file: $BAKE_HASHFILE"
+		_hk=0
+		_hn=0
+		while IFS= read -r _hl || [ -n "$_hl" ]; do
+			_hn=$((_hn + 1))
+			case $_hl in '' | '#'*) continue ;; esac
+			case $_hl in
+			'$2a$'* | '$argon2id$'*) ;;
+			*) die "build.sh: $BAKE_HASHFILE: line $_hn: the password hash must be a NetBSD pwhash(1) hash (\$2a\$ or \$argon2id\$)" ;;
+			esac
+			# the account has one password: a second hash line is
+			# refused, by its line number only
+			[ "$_hk" -eq 0 ] || die "build.sh: $BAKE_HASHFILE: line $_hn: a second password hash line (the file holds exactly one)"
+			_hk=$((_hk + 1))
+		done < "$BAKE_HASHFILE"
+		[ "$_hk" -gt 0 ] || die "build.sh: no password hash lines in $BAKE_HASHFILE"
+	fi
+fi
+
 : "${DISTRO_ARCH:=amd64}" # questions.yaml per_os default
 case $DISTRO_ARCH in
 amd64 | aarch64) MACHINE=$DISTRO_ARCH ;;
@@ -254,9 +315,35 @@ abspath() { # abspath <path> — an absolute path, without touching the disk
 
 OUT=$(abspath "$OUT")
 
+# norm_size <value> <name> — normalise a size given to makefs(1) to its
+# lowercase suffix form and refuse anything that is not a byte count or
+# digits with a single trailing k/m/g suffix (the suffixes size_bytes
+# reads as well) (a bare suffix such as "g"
+# is refused), so that "12G" is not handed to makefs(8). The size is
+# defaulted before it is passed in.
+norm_size() { # norm_size <value> <name>
+	_s=$1
+	case $_s in
+	'') die "$2 must be a size like 12g (digits, optional single k/m/g suffix)" ;;
+	esac
+	_s=$(printf '%s' "$_s" | tr '[:upper:]' '[:lower:]')
+	case $_s in
+	*[!0-9kmg]*) die "$2 is not a size like 12g (digits, optional single k/m/g suffix): $_s" ;;
+	esac
+	case $_s in
+	*[!0-9]*)
+		# a suffix needs digits in front of it: "g" alone is refused
+		case ${_s%?} in
+			'' | *[!0-9]*) die "$2 must be digits with an optional single k/m/g suffix: $_s" ;;
+		esac
+		;;
+	esac
+	printf '%s\n' "$_s"
+}
+
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 1)}
-ROOTSIZE=${ROOTSIZE:-12G}
-ESPSIZE=${ESPSIZE:-64m}
+ROOTSIZE=$(norm_size "${ROOTSIZE:-12g}" ROOTSIZE)
+ESPSIZE=$(norm_size "${ESPSIZE:-64m}" ESPSIZE)
 OBJ="$OUT/obj"
 TOOLS="$OUT/tools"
 # where the NetBSD tools are looked up: nbmakefs, nbgpt, nbinstallboot and
@@ -306,6 +393,13 @@ BOOT_BLOCK=bootxx_ffsv1
 # unpacked: the image has exactly one X11 in it. The set names are the
 # ones of the NetBSD release: there is no "x11" set.
 X_SETS='xbase xcomp xetc xfont xserver'
+
+# The kernel set unpacked from the release sets. Only one kern-<CONFIG>
+# set holds ./netbsd: unpacking more than one lets a later set win over
+# /netbsd, and a set without the GENERIC kernel does not boot. The
+# default GENERIC, overridable with the KERNEL_SET environment knob.
+KERNEL_SET=${KERNEL_SET:-GENERIC}
+chk '^[A-Z0-9_]+$' "$KERNEL_SET" 'build.sh: KERNEL_SET must match ^[A-Z0-9_]+$'
 
 # --------------------------------------------------------------------------
 # helpers
@@ -497,7 +591,15 @@ are never rebuilt from the files of this build."
 	#    been gathered, so that it only has to be sorted once.
 	awk -v ovl="$_ovl" '
 		BEGIN { while ((getline l < ovl) > 0) drop[l] = 1 }
-		{ if (!($1 in drop)) print }
+		{ if (!($1 in drop)) {
+			# build.sh rewrites some base files (etc/master.passwd,
+			# etc/rc.conf, etc/motd ...): their size= and content
+			# digest= in the release METALOG are stale, and nbmakefs(1)
+			# would cut the file to the stale size. Drop every digest
+			# keyword from the surviving line.
+			gsub(/ (size|sha256|sha512|sha384|sha1|rmd160|md5)=[^ ]*/, "")
+			print
+		} }
 	' "$_base" > "$_raw"
 	# 2. the overlay: the files and the directories it adds, appended
 	#    after the base so that a base entry is replaced in place by the
@@ -708,12 +810,19 @@ for p in $profiles; do
 	METALOG="$PSUB/metalog"
 	img="$PSUB/$DISTRO_SLUG-$p-$MACHINE.img"
 
+	# the serial console (tty00) logs in only on the appliance: the desktop
+	# logs in on the display, not on the serial console.
+	_tty00=0
+	if [ "$p" = appliance ]; then
+		_tty00=1
+	fi
+
 	# 1. unpack the release sets into the stage
 	log '  [1] release sets -> stage'
 	if [ "$DRY" -eq 1 ]; then
 		printf '    + mkdir -p %s\n' "$STAGE"
-		printf '    + tar -xJf %s/<set>.tar.xz -C %s   (every set except the X11 sets: %s)\n' \
-			"$SETS" "$STAGE" "$X_SETS"
+		printf '    + tar -xJf %s/<set>.tar.xz -C %s   (every set except the X11 sets: %s, and every kernel set but kern-%s)\n' \
+			"$SETS" "$STAGE" "$X_SETS" "$KERNEL_SET"
 	else
 		rmrf "$STAGE" "$OUT"
 		rmrf "$PARTS" "$OUT"
@@ -726,6 +835,13 @@ for p in $profiles; do
 				"$x".tar.xz) _skip=1 ;;
 				esac
 			done
+			# every kern-<CONFIG> set holds ./netbsd: only the set named by
+			# KERNEL_SET is unpacked, so /netbsd is the one we boot, not a
+			# later set's copy.
+			case ${set##*/} in
+			"kern-${KERNEL_SET}".tar.xz) ;;
+			kern-*) _skip=1 ;;
+			esac
 			[ "$_skip" -eq 0 ] || continue
 			"$(tool tar)" -xJf "$set" -C "$STAGE"
 		done
@@ -775,6 +891,10 @@ for p in $profiles; do
 				"$STAGE" "$ZFS_POOL_NAME"
 		fi
 		printf '    + lock root in %s/etc/master.passwd and rebuild the password database\n' "$STAGE"
+		if [ "$_tty00" -eq 1 ]; then
+			printf '    + enable tty00 in %s/etc/ttys (the appliance logs in on the serial console)\n' "$STAGE"
+		fi
+		printf '    + bake %s/etc/firstboot-user.conf from -u/-k/-H (mode 0600), if given\n' "$STAGE"
 	else
 		# rc.conf(5): rc_configured=YES is what makes rc(8) run the
 		# per-service scripts at boot. The stock file is edited in place
@@ -805,6 +925,52 @@ for p in $profiles; do
 			: > "$STAGE/var/db/firstboot_user"
 			chmod 644 "$STAGE/var/db/firstboot_user"
 		fi
+		# the appliance logs in on the serial console (tty00) as well as
+		# the display: the stock /etc/ttys leaves tty00 off. Enable it on
+		# the staged copy only (the upstream tree is untouched). The desktop
+		# does not log in on the serial console, so tty00 stays off there.
+		if [ "$_tty00" -eq 1 ] && [ -f "$STAGE/etc/ttys" ]; then
+			sed 's/^\(tty00[[:space:]].*[[:space:]]\)off\([[:space:]].*\)$/\1on\2/' \
+				"$STAGE/etc/ttys" > "$STAGE/etc/ttys.new"
+			mv "$STAGE/etc/ttys.new" "$STAGE/etc/ttys"
+			chmod 644 "$STAGE/etc/ttys"
+		fi
+		# 3b. bake the first-boot user: /etc/firstboot-user.conf.
+		# USERNAME=USER, one SSH_KEY= line per non-empty, non-comment line
+		# of the PUBKEYFILE, and one PASSWORD_HASH= per non-empty, non-
+		# comment line of the HASHFILE. The validation already ran at the
+		# static checks, in the dry run too; here the conf is written,
+		# mode 0600, because it may hold a password hash. Without -u/-k the
+		# operator writes the file by hand on the first boot.
+		if [ -n "$BAKE_USER" ] || [ -n "$BAKE_KEYFILE" ] || [ -n "$BAKE_HASHFILE" ]; then
+			_cfb="$STAGE/etc/firstboot-user.conf"
+			# the conf is written under umask 077, so it is 0600 from
+			# the moment it exists and never readable by group or other
+			(
+				umask 077
+				printf 'USERNAME=%s\n' "$BAKE_USER" > "$_cfb"
+				# each non-empty, non-comment line of the pubkey file
+				# is one authorized_keys line of the operator
+				while IFS= read -r _kl || [ -n "$_kl" ]; do
+					case $_kl in '' | '#'*) continue ;; esac
+					printf 'SSH_KEY=%s\n' "$_kl" >> "$_cfb"
+				done < "$BAKE_KEYFILE"
+				# each non-empty, non-comment line of the hash file is
+				# a PASSWORD_HASH= line; it is validated at the static
+				# checks
+				if [ -n "$BAKE_HASHFILE" ]; then
+					while IFS= read -r _hl || [ -n "$_hl" ]; do
+						case $_hl in '' | '#'*) continue ;; esac
+						printf 'PASSWORD_HASH=%s\n' "$_hl" >> "$_cfb"
+					done < "$BAKE_HASHFILE"
+				fi
+			)
+			# the conf is operator data (it may hold a password hash):
+			# owner root:wheel, mode 0600 (also for a file that was
+			# already there). chown needs root, so guard it.
+			chmod 600 "$_cfb"
+			[ "$(id -u)" -eq 0 ] && chown root:wheel "$_cfb"
+		fi
 	fi
 
 	# 4. pkgsrc packages: base list + profile list, installed into the stage
@@ -812,7 +978,25 @@ for p in $profiles; do
 	# the package names come from the static packages.list files, so the
 	# word split of $pkgs here is wanted (one package per word)
 	pkgs=$(pkg_list "$ROOT/overlay/base/packages.list" "$ROOT/overlay/profiles/$p/packages.list")
-	if [ -n "$pkgs" ]; then
+	# pkg_add(1) installs pkg bootstrap tooling and cannot run on a build
+	# host that is not NetBSD. On a real build that is refused, or, with
+	# WTFBSD_NO_PACKAGES=yes, skipped; the dry run prints the reason and
+	# still lists the pkg_add call in the plan.
+	_host=${WTFBSD_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}
+	install_pkg=1
+	if [ -n "$pkgs" ] && [ "$_host" != NetBSD ]; then
+		if [ "$DRY" -eq 1 ]; then
+			# the plan below still lists the pkg_add call
+			printf '    + (packages need a NetBSD build host; this host is %s: the real build refuses, or skips them with WTFBSD_NO_PACKAGES=yes)\n' "$_host"
+		elif [ "${WTFBSD_NO_PACKAGES:-no}" = yes ]; then
+			install_pkg=0
+			log "    (WTFBSD_NO_PACKAGES=yes: skipping packages on a non-NetBSD host ($_host))"
+		else
+			die "installing packages needs a NetBSD build host (this host is $_host)
+set WTFBSD_NO_PACKAGES=yes to skip them, empty packages.list, or build on NetBSD"
+		fi
+	fi
+	if [ -n "$pkgs" ] && [ "$install_pkg" -eq 1 ]; then
 		# PKG_RCD_SCRIPTS=YES installs the rc.d scripts of the packages
 		# into /etc/rc.d of the stage, where rc(8) finds them.
 		# The -P destination option of pkg_add(1) is marked unverified:
@@ -838,7 +1022,7 @@ for p in $profiles; do
 		printf '    + mkdir -p %s/efi/EFI/BOOT; cp %s/usr/mdec/%s %s/efi/EFI/BOOT/%s\n' \
 			"$PARTS" "$STAGE" "$EFI_LOADER" "$PARTS" "$EFI_BOOT_NAME"
 		printf '    + nbmakefs -t msdos -s %s -o fat_type=16 %s/efi.img %s/efi\n' "$ESPSIZE" "$PARTS" "$PARTS"
-		printf '    + dd the disk image (%s), then nbgpt create; nbgpt add -t efi -l %sesp; nbgpt add -t %s -l %sroot\n' \
+		printf '    + dd the disk image (%s), then nbgpt <disk> create; nbgpt <disk> add -t efi -l %sesp; nbgpt <disk> add -t %s -l %sroot\n' \
 			"$DISKSIZE" "$DISTRO_SLUG" "$NETBSD_FFS_TYPE" "$DISTRO_SLUG"
 		printf '    + dd the ESP and the root filesystem into the disk image at their partition offsets\n'
 	else
@@ -868,16 +1052,16 @@ for p in $profiles; do
 		# the disk image is created first: the GPT is written into it
 		_disk_mb=$(( (DISKB + 1048575) / 1048576 ))
 		"$(tool dd)" if=/dev/zero of="$PARTS/disk.img" bs=1m count=0 seek="$_disk_mb"
-		"$(tool nbgpt)" create "$PARTS/disk.img"
-		"$(tool nbgpt)" add -t efi -s "$ESPSIZE" -i 1 -l "${DISTRO_SLUG}esp" "$PARTS/disk.img"
-		"$(tool nbgpt)" add -t "$NETBSD_FFS_TYPE" -s "$ROOTSIZE" -i 2 -l "${DISTRO_SLUG}root" "$PARTS/disk.img"
+		"$(tool nbgpt)" "$PARTS/disk.img" create
+		"$(tool nbgpt)" "$PARTS/disk.img" add -t efi -s "$ESPSIZE" -i 1 -l "${DISTRO_SLUG}esp"
+		"$(tool nbgpt)" "$PARTS/disk.img" add -t "$NETBSD_FFS_TYPE" -s "$ROOTSIZE" -i 2 -l "${DISTRO_SLUG}root"
 		# the listing is read as the gpt(8) layout: start, size, index
 		# and contents, with the PMBR, the primary GPT header and the
 		# primary GPT table first. The offsets are in 512 byte blocks,
 		# which is the unit of the dd below; both are listed as
 		# unverified in the round report.
 		_gptshow="$PARTS/gpt.show"
-		"$(tool nbgpt)" show -p "$PARTS/disk.img" > "$_gptshow"
+		"$(tool nbgpt)" "$PARTS/disk.img" show > "$_gptshow"
 		_esp_off=$(gpt_offset "$_gptshow" 1)
 		_root_off=$(gpt_offset "$_gptshow" 2)
 		[ -n "$_esp_off" ] && [ -n "$_root_off" ] || die "cannot read the partition offsets of $PARTS/disk.img"

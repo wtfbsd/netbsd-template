@@ -70,6 +70,8 @@ cat > "$DEST/METALOG" <<'METALOG'
 . type=dir mode=0755 time=0.0 size=512 uname=root gname=wheel
 ./etc type=dir mode=0755 time=0.0 size=4096 uname=root gname=wheel
 ./etc/rc.d type=dir mode=0755 time=0.0 size=1024 uname=root gname=wheel
+./etc/master.passwd type=file uname=root gname=wheel mode=0600 size=1599 sha256=6f1ed002ab5595859014ebf0951522d9f6f2fb1e7b2c3d4a5e6f708192a3b4c5
+./etc/ttys type=file uname=root gname=wheel mode=0644 size=1003 md5=9e107d9d372bb6826bd81d3542a419d6 sha1=2fd4e1c67a2d28fced849ee1bb76e7391b93eb12 sha384=ca737f1014a48f4c0b6dd43cb177b0afd9e5169367544c494011e3317dbf9a509cb1e5dc1e85a941bbee3d7f2afbc9b1 sha512=07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6 rmd160=37f332f68db77bd9d7edd4969571ad671cf9dd3b
 ./etc/fstab type=file mode=0644 time=0.0 size=64 uname=root gname=wheel sha256=5b8f0c1d9a4e7b2c3d6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5
 ./etc/motd type=file mode=0644 time=0.0 size=32 uname=root gname=wheel sha256=1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
 ./etc/myname type=file mode=0644 time=0.0 size=16 uname=root gname=wheel sha256=2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b

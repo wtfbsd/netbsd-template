@@ -26,6 +26,19 @@ needs_arg() {
 	exit 1
 }
 
+# check_size <size> — makefs(8) reads -s with strsuftoll(3): digits with
+# an optional lowercase b, k, m, g, t or w suffix. An uppercase suffix
+# ("12G") is refused exactly as the real tool refuses it:
+#   nbmakefs: size '12G': illegal number
+check_size() {
+	case $1 in
+	'' | *[!0-9bkmgtw]* | [!0-9]* | *[bkmgtw]?*)
+		printf "%s: size '%s': illegal number\n" "$PROG" "$1" >&2
+		exit 1
+		;;
+	esac
+}
+
 printf '%s\n' "nbmakefs $*" >> "$STUB_LOG"
 
 spec=''
@@ -39,6 +52,7 @@ while [ $# -gt 0 ]; do
 		[ $# -ge 2 ] || needs_arg "$1"
 		case $1 in
 		-F) spec=$2 ;;
+		-s) check_size "$2" ;;
 		esac
 		shift 2
 		;;

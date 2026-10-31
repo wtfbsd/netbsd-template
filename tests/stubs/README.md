@@ -28,9 +28,10 @@
 #   nbinstallboot installboot(8): -c -e -f -m -n -o -t -v
 #   pkg_add       pkg_add(1):     -A -f -I -K -m -n -P -p -R -U -u -V -v
 #   nbpwd_mkdb    pwd_mkdb(8):    -B -L -l -p -s -v -w -c -d -u -V
-#   nbgpt         gpt(8):         the global options -r -v -s -p, and the
-#                                subcommands create, add, show, label and
-#                                destroy with their own options
+#   nbgpt         gpt(8):         the device is the first word
+# (``nbgpt <device> <subcommand> [options]``); create and add accept the
+# options -f -n -r -v -p together with -t/-s/-i/-l of add, and show takes
+# only the device, so ``show -p`` is refused.
 #
 # The global options of gpt(8) are marked as unverified in the round
 # report: they come from the manual page, not from a run of the tool.

@@ -189,6 +189,7 @@ line by line and never sources it.
 ./build.sh -c product.conf                    # the profile of product.conf
 ./build.sh -c product.conf -p both            # appliance + desktop
 ./build.sh -c product.conf -s /path/to/src    # another NetBSD source tree
+./build.sh -c product.conf -u alice -k keys   # also bake /etc/firstboot-user.conf
 ```
 
 The dry run validates the configuration, prints the whole plan and
@@ -210,8 +211,10 @@ the files of the build host: an unprivileged `tar` drops the setuid bits.
 names of the image are resolved from the passwd and the group of the
 target and never from the ones of the build host.
 
-Knobs: `ROOTSIZE` (default `12G`), `ESPSIZE` (default `64m`), `DISKSIZE`
+Knobs: `ROOTSIZE` (default `12g`), `ESPSIZE` (default `64m`), `DISKSIZE`
 (default: the root plus the EFI partition plus slack), `PKG_PATH`,
+`KERNEL_SET` (the one kernel set unpacked, default `GENERIC`),
+`WTFBSD_NO_PACKAGES=yes` (skip the pkgsrc install on a non-NetBSD host),
 `WTFBSD_TOOLDIR` (where `nbmakefs`, `nbgpt`, `nbinstallboot` and
 `nbpwd_mkdb` are looked up; by default the tools directory of this build).
 
@@ -257,14 +260,30 @@ KEYWORD `firstboot`, so the script runs once, guarded by a sentinel:
 `build.sh` touches `/var/db/firstboot_user` into the image and the script
 removes it when it is done.
 
+`build.sh` bakes the file, from the command line:
+
+```
+./build.sh -c product.conf -u alice -k keys [-H hashes]
+```
+
+`-u alice` and `-k keys` are a required pair. `-k` is a file of ssh public
+keys, one per line; `build.sh` writes `USERNAME=USER` and one `SSH_KEY=` line
+per non-empty, non-comment line of the file. `-H HASHFILE` (needs `-u`) is a
+file of password hashes, one per line; `build.sh` adds one `PASSWORD_HASH=`
+line per non-empty, non-comment line. Only `$2a$` and `$argon2id$` are
+accepted; a bad key or hash is refused, in the dry run too, before anything is
+built. The conf is written mode 0600, because it may hold a hash. If `build.sh`
+is run without `-u`, the file is not baked: the operator writes it by hand on
+the first boot.
+
 It **parses** (never sources) `/etc/firstboot-user.conf` (`KEY=value`
 lines):
 
 ```
-USERNAME=alice        # ^[a-z_][a-z0-9_-]{0,31}$, required
+USERNAME=alice        # ^[a-z_][a-z0-9_-]{0,31}$, required (baked by build.sh)
 FULLNAME=Alice        # no ':' / control characters, optional (default: username)
 SSH_KEY=<a key line>  # one authorized_keys line, may repeat (at least one)
-PASSWORD_HASH=$6$...  # crypt(3), $6$ or $2b$ only, optional ($6$|$2b$)
+PASSWORD_HASH=$2a$... # NetBSD pwhash(1), $2a$ or $argon2id$ only, optional
 WHEEL=yes             # yes|no, default yes
 ```
 
