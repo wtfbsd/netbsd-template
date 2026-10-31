@@ -4,7 +4,7 @@
 # first boot.
 #
 # PROVIDE: firstboot_user
-# REQUIRE: FILESYSTEMS NETWORKING
+# REQUIRE: NETWORKING mountall
 # BEFORE: LOGIN
 #
 # Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
@@ -24,7 +24,8 @@
 #   USERNAME=alice        ^[a-z_][a-z0-9_-]{0,31}$           (required)
 #   FULLNAME=Alice        no ':' and no control characters   (optional)
 #   SSH_KEY=ssh-...       one authorized_keys line, repeatable
-#   PASSWORD_HASH=$6$...  crypt(3) starting with $6$ or $2b$  (optional)
+#   PASSWORD_HASH=$2a$...  crypt(3) NetBSD pwhash(1) starting with
+#                          $2a$ or $argon2id$ (optional)
 #   WHEEL=yes|no          default yes
 #
 # NetBSD has no pw(8): the account is created with useradd(8), which
@@ -115,18 +116,29 @@ firstboot_user_start() {
 		return 0
 	fi
 
-	# pass 1: parse and validate EVERYTHING before touching the system
+	# pass 1: parse and validate EVERYTHING before touching the system.
+	# A defective line is reported by its line number in the conf, never
+	# by its content (key or value), because the line may hold the
+	# password hash.
+	_ln=0
 	while IFS= read -r _l || [ -n "$_l" ]; do
+		_ln=$((_ln + 1))
 		case $_l in
 		'' | '#'*) continue ;;
-		[A-Z_]*=*) ;;
+		*=*) ;;
 		*)
-			note "not a KEY=value line: $_l"
+			note "$_conf: line $_ln is not a KEY=value line"
 			return 1
 			;;
 		esac
 		_k=${_l%%=*}
 		_v=${_l#*=}
+		case $_k in
+		'' | *[!A-Z_]*)
+			note "$_conf: line $_ln is not a KEY=value line (the key is not upper case)"
+			return 1
+			;;
+		esac
 		case $_k in
 		USERNAME)
 			if ! printf '%s\n' "$_v" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
@@ -162,26 +174,32 @@ $_v"
 			;;
 		PASSWORD_HASH)
 			case $_v in
-			'$6$'* | '$2b$'*) ;;
+			'$2a$'* | '$argon2id$'*) ;;
 			*)
-				note 'PASSWORD_HASH must be a crypt(3) string starting with $6$ or $2b$'
+				note 'PASSWORD_HASH must be a NetBSD pwhash(1) hash ($2a$ or $argon2id$)'
 				return 1
 				;;
 			esac
+			# the account has one password: a second PASSWORD_HASH
+			# line is refused, by its line number only
+			if [ -n "$_hash" ]; then
+				note "$_conf: line $_ln: a second PASSWORD_HASH line (only one is allowed)"
+				return 1
+			fi
 			_hash=$_v
 			;;
 		WHEEL)
 			case $_v in
 			yes | no) ;;
 			*)
-				note "WHEEL must be yes or no (got: $_v)"
+				note "$_conf: line $_ln: WHEEL must be yes or no"
 				return 1
 				;;
 			esac
 			_wheel=$_v
 			;;
 		*)
-			note "unknown key in $_conf: $_k"
+			note "$_conf: line $_ln: unknown key"
 			return 1
 			;;
 		esac
@@ -216,8 +234,12 @@ $_v"
 		# The hash is applied with usermod(8). NetBSD has no pw(8) and
 		# its chpass(1) is the editor based one, so the hash is the
 		# argument of the command: it is visible in the process table
-		# for as long as the command runs.
-		if usermod -p "$_hash" "$_user"; then
+		# for as long as the command runs. The format was checked in
+		# pass 1, so usermod(8) should accept it; still, on error it
+		# would echo the hash. Its stderr is discarded, and only the
+		# generic note below is printed: the hash never reaches the
+		# console, syslog or the log.
+		if usermod -p "$_hash" "$_user" 2> /dev/null; then
 			note "password hash applied to $_user"
 		else
 			note "usermod could not apply the password hash of $_user"

@@ -548,6 +548,11 @@ printf '# $NetBSD$\nrc_configured="NO"\n' > "$fakestage/etc/rc.conf"
 printf 'root:*:0:0:0:0:0:0\n' > "$fakestage/etc/passwd"
 printf 'root::0:0:0:0:0:0:0\n' > "$fakestage/etc/master.passwd"
 printf 'root:*:0:\nwheel:*:0:root\n' > "$fakestage/etc/group"
+# the stock NetBSD /etc/ttys (status field "off"): the build enables tty00
+# so the appliance logs in on the serial console (tty00, getty std.9600)
+printf '#	"Name"	"Type"	"tty"	"attach"	"terminals"\n' > "$fakestage/etc/ttys"
+printf 'console	"/usr/libexec/getty Pc"		vt100	off secure\n' >> "$fakestage/etc/ttys"
+printf 'tty00	"/usr/libexec/getty std.9600"	unknown off secure\n' >> "$fakestage/etc/ttys"
 printf 'the kernel\n' > "$fakestage/netbsd"
 printf 'the amd64 efi loader\n' > "$fakestage/usr/mdec/bootx64.efi"
 printf 'the aarch64 efi loader\n' > "$fakestage/usr/mdec/bootaa64.efi"
@@ -586,7 +591,10 @@ real_build() { # real_build <out-dir-relative-to-work> [conf] [env-assignment...
 	(
 		cd "$work" || exit 1
 		umask "$real_build_umask"
-		env "$@" \
+		# the harness simulates the whole NetBSD environment through the
+		# stubs, so the build sees a NetBSD host here: pkg_add is installed
+		# unless a test overrides the host with WTFBSD_HOST_OS=<other>
+		env WTFBSD_HOST_OS=NetBSD "$@" \
 			STUB_LOG="$log_file" \
 			STUB_REAL_TAR="$STUB_REAL_TAR" \
 			STUB_REAL_DD="$STUB_REAL_DD" \
@@ -675,8 +683,8 @@ if grep -q -- 'pkg_add .* -R ' "$stub_log"; then
 else
 	ok "(B4) pkg_add is never called with -R"
 fi
-mkdir -p "$work/repo/NetBSD-10.0-aarch64"
-PKG_PATH="$work/repo/NetBSD-10.0-aarch64"
+mkdir -p "$work/repo/NetBSD-11.0-aarch64"
+PKG_PATH="$work/repo/NetBSD-11.0-aarch64"
 export PKG_PATH
 real_build out-arch
 unset PKG_PATH
@@ -737,6 +745,49 @@ else
 	sed 's/^/      | /' "$work/real.log" | head -20
 fi
 
+# --- D8: pkg_add needs a NetBSD build host ---------------------------------
+# pkg_add(1) installs pkg bootstrap tooling and cannot run on a build host
+# that is not NetBSD. When the host is not NetBSD and packages.list is not
+# empty the build refuses, unless WTFBSD_NO_PACKAGES=yes. The harness
+# simulates the NetBSD environment through the stubs; a test overrides the
+# host with WTFBSD_HOST_OS.
+mkdir -p "$work/repo-x86/NetBSD/x86_64/2023Q1/All"
+PKG_PATH="$work/repo-x86/NetBSD/x86_64/2023Q1/All"
+export PKG_PATH
+real_build out-linux "$fixture" WTFBSD_HOST_OS=Linux
+unset PKG_PATH
+if [ "$REAL_RC" -ne 0 ] && grep -qi 'needs a NetBSD build host' "$work/real.log"; then
+	ok "(D8) a non-NetBSD build host is refused when packages.list is not empty"
+else
+	no "(D8) a non-NetBSD build host is refused when packages.list is not empty (rc=$REAL_RC)"
+	sed 's/^/      | /' "$work/real.log" | head -20
+fi
+real_build out-linux-nopkg "$fixture" WTFBSD_HOST_OS=Linux WTFBSD_NO_PACKAGES=yes
+unset PKG_PATH
+if [ "$REAL_RC" -eq 0 ] && ! grep -q 'pkg_add ' "$log_file"; then
+	ok "(D8b) WTFBSD_NO_PACKAGES=yes skips the packages on a non-NetBSD host"
+else
+	no "(D8b) WTFBSD_NO_PACKAGES=yes skips the packages on a non-NetBSD host (rc=$REAL_RC)"
+	sed 's/^/      | /' "$work/real.log" | head -20
+fi
+# the refusal names the one way that works (a NetBSD build host): the build
+# has no code path for a NetBSD pkg_add on PKG_PATH, so it never offers one
+real_build out-linux-msg "$fixture" WTFBSD_HOST_OS=Linux
+if [ "$REAL_RC" -ne 0 ] && ! grep -q 'pkg_add on PKG_PATH' "$work/real.log"; then
+	ok "(D8c) the non-NetBSD refusal does not offer a pkg_add on PKG_PATH"
+else
+	no "(D8c) the non-NetBSD refusal does not offer a pkg_add on PKG_PATH (rc=$REAL_RC)"
+	sed 's/^/      | /' "$work/real.log" | head -20
+fi
+# the dry run on a non-NetBSD host prints the package-host reason too
+WTFBSD_HOST_OS=Linux sh "$build" -c "$fixture" -o "$work/out-d8d" -n > "$work/d8d.log" 2>&1
+if [ "$?" -eq 0 ] && grep -q 'packages need a NetBSD build host; this host is Linux' "$work/d8d.log"; then
+	ok "(D8d) the dry run on a non-NetBSD host prints the package-host reason"
+else
+	no "(D8d) the dry run on a non-NetBSD host prints the package-host reason"
+	sed 's/^/      | /' "$work/d8d.log" | head -20
+fi
+
 # --- B5: installboot takes the boot block of the file system version -------
 if grep -q -- "nbinstallboot -m amd64 $parts/root.img $stage/usr/mdec/bootxx_ffsv1" "$stub_log"; then
 	ok "(B5) nbinstallboot gets the bootxx_ffsv1 boot block"
@@ -774,18 +825,18 @@ if grep -q -- "dd if=/dev/zero of=$parts/disk.img bs=1m count=0 seek=" "$stub_lo
 else
 	no "(B6) the disk image is created with dd before the GPT is written"
 fi
-if grep -q -- "nbgpt create $parts/disk.img" "$stub_log"; then
+if grep -q -- "nbgpt $parts/disk.img create" "$stub_log"; then
 	ok "(B6) the GPT is created with nbgpt"
 else
 	no "(B6) the GPT is created with nbgpt"
 fi
-if grep -q -- "nbgpt add -t efi -s 16m -i 1 -l examplebsdesp $parts/disk.img" "$stub_log" &&
-	grep -q -- "nbgpt add -t 49f48d5a-b10e-11dc-b99b-0019d1879648 -s 64M -i 2 -l examplebsdroot $parts/disk.img" "$stub_log"; then
+if grep -q -- "nbgpt $parts/disk.img add -t efi -s 16m -i 1 -l examplebsdesp" "$stub_log" &&
+	grep -q -- "nbgpt $parts/disk.img add -t 49f48d5a-b10e-11dc-b99b-0019d1879648 -s 64m -i 2 -l examplebsdroot" "$stub_log"; then
 	ok "(B6) both partitions are added with their label"
 else
 	no "(B6) both partitions are added with their label"
 fi
-if grep -q -- "nbgpt create -[a-zA-Z]* [0-9]" "$stub_log"; then
+if grep -q -- "nbgpt $parts/disk.img create -[a-zA-Z]* [0-9]" "$stub_log"; then
 	no "(B6) the GPT is created without a size"
 else
 	ok "(B6) the GPT is created without a size"
@@ -965,6 +1016,101 @@ else
 	grep -- '^\./netbsd ' "$uspec" 2> /dev/null | sed 's/^/      | /'
 fi
 
+# --- D4: the metadata spec has no stale size=/digest keyword ---------------
+# The build rewrites base files (etc/rc.conf, etc/motd, ...): the release
+# METALOG records their stale size= and content digest, and nbmakefs(1)
+# would cut the file to the stale size. The spec strips every digest
+# keyword from the lines that survive (files build.sh rewrites).
+if grep -qE -- ' (size|sha256|sha512|sha384|sha1|rmd160|md5)=' "$out/appliance/metalog" 2>/dev/null; then
+	no "(D4) the metadata spec has no stale size=/digest keyword (otherwise the rewritten files are truncated)"
+	grep -nE -- ' (size|sha256|sha512|sha384|sha1|rmd160|md5)=' "$out/appliance/metalog" 2>/dev/null | head
+else
+	ok "(D4) the metadata spec has no stale size=/digest keyword"
+fi
+# the release METALOG records ./etc/master.passwd with its size= and sha256=
+# (tests/fixtures/fake-src-build.sh); build.sh rewrites the file (root is
+# locked), so neither keyword may survive on its entry, and the mode stays
+mpline=$(grep '^\./etc/master\.passwd ' "$out/appliance/metalog" 2>/dev/null)
+case $mpline in
+'' | *' size='* | *' sha256='*)
+	no "(D4) ./etc/master.passwd is in the spec without the stale size=/sha256= of the release"
+	printf '      | %s\n' "$mpline"
+	;;
+*' mode=0600'*)
+	ok "(D4) ./etc/master.passwd is in the spec without the stale size=/sha256= of the release"
+	;;
+*)
+	no "(D4) ./etc/master.passwd is in the spec without the stale size=/sha256= of the release (mode)"
+	printf '      | %s\n' "$mpline"
+	;;
+esac
+
+# the release METALOG records ./etc/ttys with every digest keyword mtree(8)
+# writes (md5= sha1= sha384= sha512= rmd160=, besides size=): the build
+# rewrites the file (tty00 on), so none of them may survive on its entry
+ttline=$(grep '^\./etc/ttys ' "$out/appliance/metalog" 2>/dev/null)
+case $ttline in
+'' | *' size='* | *' md5='* | *' sha1='* | *' sha384='* | *' sha512='* | *' rmd160='* | *' sha256='*)
+	no "(D4) ./etc/ttys is in the spec without any stale size=/md5=/sha1=/sha384=/sha512=/rmd160="
+	printf '      | %s\n' "$ttline"
+	;;
+*)
+	ok "(D4) ./etc/ttys is in the spec without any stale size=/md5=/sha1=/sha384=/sha512=/rmd160="
+	;;
+esac
+
+# --- D12b: KERNEL_SET is a kernel configuration name, never a pattern ----
+# KERNEL_SET names the kern-<CONFIG> set; it must match ^[A-Z0-9_]+$, so a
+# glob such as GEN* is refused, in the dry run too
+KERNEL_SET='GEN*' sh "$build" -c "$fixture" -o "$work/out-ksglob" -n > "$work/ksglob.log" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] && grep -q 'KERNEL_SET must match' "$work/ksglob.log"; then
+	ok "(D12b) KERNEL_SET='GEN*' makes the dry run exit non-zero"
+else
+	no "(D12b) KERNEL_SET='GEN*' makes the dry run exit non-zero (rc=$_rc)"
+	sed 's/^/      | /' "$work/ksglob.log" | head -5
+fi
+
+# --- D6: the serial console login (tty00) is enabled -----------------------
+# The appliance logs in on tty00 as well as the display: the stock /etc/ttys
+# leaves tty00 off, and the build enables it on the staged copy only.
+if [ -f "$stage/etc/ttys" ] && \
+	grep -qE '^tty00[[:space:]].*[[:space:]]on[[:space:]]' "$stage/etc/ttys" && \
+	! grep -qE '^tty00[[:space:]].*[[:space:]]off[[:space:]]' "$stage/etc/ttys"; then
+	ok "(D6) tty00 is enabled (off -> on) in the staged /etc/ttys"
+else
+	no "(D6) tty00 is enabled (off -> on) in the staged /etc/ttys"
+	sed -n 's/^tty00.*$/tty00: &/p' "$stage/etc/ttys" 2>/dev/null
+fi
+# only the appliance logs in on the serial console: the desktop stage keeps
+# the stock tty00 line, status field off
+sed "s/^PROFILE=.*/PROFILE='desktop'/" "$fixture" > "$work/desktop.conf"
+real_build out-desk "$work/desktop.conf"
+dttys="$work/out-desk/desktop/stage/etc/ttys"
+if [ "$REAL_RC" -eq 0 ] && [ -f "$dttys" ] && \
+	grep -qE '^tty00[[:space:]].*[[:space:]]off[[:space:]]' "$dttys" && \
+	! grep -qE '^tty00[[:space:]].*[[:space:]]on[[:space:]]' "$dttys"; then
+	ok "(D6) the desktop stage keeps tty00 off in /etc/ttys"
+else
+	no "(D6) the desktop stage keeps tty00 off in /etc/ttys (rc=$REAL_RC)"
+	sed -n 's/^tty00.*$/tty00: &/p' "$dttys" 2>/dev/null
+	sed 's/^/      | /' "$work/real.log" | tail -5
+fi
+
+# --- D9: the motd template is pure ASCII ----------------------------------
+# A MOTD is shown on the serial console, so the template that build.sh turns
+# it into must be ASCII: a non-ASCII byte (the em dash the template used to
+# carry) would show as junk on the console. The em dash is matched by its
+# UTF-8 bytes via printf(1), so the check needs no literal byte in this file.
+motdtmpl="$repo/overlay/base/rootfs/etc/motd.template"
+emdash=$(printf '\342\200\224')
+if [ -f "$motdtmpl" ] && ! LC_ALL=C grep -q -- "$emdash" "$motdtmpl"; then
+	ok "(D9) the motd template is ASCII (no em dash)"
+else
+	no "(D9) the motd template is ASCII (no em dash)"
+	sed -n '1,20p' "$motdtmpl" 2>/dev/null | head
+fi
+
 # --- C7: the build needs no root ------------------------------------------
 if [ "$(id -u)" -ne 0 ] && [ "$rc" -eq 0 ]; then
 	ok "(C7) the build runs as an ordinary user"
@@ -1094,6 +1240,425 @@ else
 	no "(C8) the first-boot script uses the NetBSD rc variable firstboot_user"
 fi
 
+# --- D5: the password-hash formats the script accepts, and the redaction --
+# firstboot_user(8) accepts only the NetBSD pwhash(1) formats $2a$ and
+# $argon2id$: a $6$, a $2b$ or anything else is refused on the first pass,
+# before any account is touched. The hash is the argument of usermod(8); on
+# error usermod(8) would echo it, so its stderr is discarded and the hash
+# never reaches the console, syslog or the log.
+mkdir -p "$work/d5" "$work/d5bin"
+# the ssh-ed25519 key is given as the printf argument, so the probe shape
+# (ssh-ed25519 space, key data) never reads as a contiguous source key
+key='AAAAC3NzaC1lZDI1NTE5AAAAI'
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=$2a$06$abcdefghijklmnopqrstuv.Wxyzabcdefghijklmnopqr\n' "$key" > "$work/d5/d2a.conf"
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=4$c2FsdHRzdGF0ZQ$YWJjZGVmZ2hpamtscg\n' "$key" > "$work/d5/dargon.conf"
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=not-a-hash\n' "$key" > "$work/d5/dbad.conf"
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=$2a$06$REDACTEDREDACTEDREDACTEDREDACTED\n' "$key" > "$work/d5/dred.conf"
+cat > "$work/d5bin/useradd" <<'UAEOF'
+#!/bin/sh
+printf '%s\n' "useradd $*" >> "$STUB_LOG"
+exit 0
+UAEOF
+cat > "$work/d5bin/usermod.fail" <<'UMEF'
+#!/bin/sh
+printf '%s\n' "usermod $*" >> "$STUB_LOG"
+printf '%s: %s: invalid hash\n' "$0" "$2" >&2
+exit 1
+UMEF
+cat > "$work/d5bin/usermod.ok" <<'UMEOK'
+#!/bin/sh
+printf '%s\n' "usermod $*" >> "$STUB_LOG"
+exit 0
+UMEOK
+# the logger the script's note() falls back to: it records to STUB_LOG, so
+# a test can assert the log never carries a value the script was told to hide
+cat > "$work/d5bin/logger" <<'LOGBIN'
+#!/bin/sh
+printf 'logger: %s\n' "$*" >> "$STUB_LOG" 2>/dev/null || true
+exit 0
+LOGBIN
+chmod 755 "$work/d5bin/useradd" "$work/d5bin/usermod.fail" "$work/d5bin/usermod.ok" "$work/d5bin/logger"
+# d5run <outfile> <conf> <home> <sentinel> <modustub-stem>: run firstboot_user
+d5run() {
+	_out=$1 _conf=$2 _home=$3 _sent=$4 _mod=$5
+	mkdir -p "$_home/.ssh"
+	: > "$_sent"
+	cp "$work/d5bin/usermod.$_mod" "$work/d5bin/usermod"
+	(
+		cd "$work/d5" || exit 1
+		STUB_LOG="$_out.stub.log" \
+			firstboot_user=YES \
+			firstboot_user_rcsubr="$stubs/rc.subr" \
+			firstboot_user_conf="$_conf" \
+			firstboot_user_sentinel="$_sent" \
+			firstboot_user_home="$_home" \
+			PATH="$work/d5bin:$PATH" \
+			sh "$stage/etc/rc.d/firstboot_user" start > "$_out" 2>&1
+	)
+}
+# $2a$ and $argon2id$ are accepted: useradd(8) creates the account, usermod(8)
+# applies the hash, and the conf is consumed on success
+d5run "$work/d5/d2a.out" "$work/d5/d2a.conf" "$work/d5/home-2a" "$work/d5/sent-2a" ok
+if [ "$?" -eq 0 ] && grep -Fq '$2a$06$abcdefghijklmnopqrstuv.Wxyzabcdefghijklmnopqr' "$work/d5/d2a.out.stub.log" && \
+	[ -f "$work/d5/d2a.conf.done" ] && [ ! -f "$work/d5/sent-2a" ]; then
+	ok '(D5) the password hash format $2a$ is accepted'
+else
+	no '(D5) the password hash format $2a$ is accepted'
+	sed 's/^/      | /' "$work/d5/d2a.out" 2>/dev/null | head
+fi
+d5run "$work/d5/dargon.out" "$work/d5/dargon.conf" "$work/d5/home-argon" "$work/d5/sent-argon" ok
+if [ "$?" -eq 0 ] && grep -Fq '$argon2id' "$work/d5/dargon.out.stub.log" && \
+	[ -f "$work/d5/dargon.conf.done" ] && [ ! -f "$work/d5/sent-argon" ]; then
+	ok '(D5) the password hash format $argon2id$ is accepted'
+else
+	no '(D5) the password hash format $argon2id$ is accepted'
+	sed 's/^/      | /' "$work/d5/dargon.out" 2>/dev/null | head
+fi
+# crypt(3) hashes build.sh and firstboot_user refuse ($6$, $2b$): the
+# accepted formats are $2a$ and $argon2id$ only, so a $6$ or a $2b$ is
+# refused on the first pass, before the account is touched (the stub log
+# holds the logger notes, never a useradd or usermod call).
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=$6$abcd$Saltsaltsalt1234567890abcdefghij\n' "$key" > "$work/d5/d6.conf"
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=$2b$12$abcdefghijqrstuvwx.yabcdefghijklmnopqrstuvwxyz01234567\n' "$key" > "$work/d5/d2b.conf"
+d5run "$work/d5/d6.out" "$work/d5/d6.conf" "$work/d5/home-6" "$work/d5/sent-6" ok
+if [ "$?" -ne 0 ] && grep -q 'must be a NetBSD pwhash(1) hash' "$work/d5/d6.out" && \
+	[ -f "$work/d5/sent-6" ] && [ ! -f "$work/d5/d6.conf.done" ] && \
+	[ ! -f "$work/d5/home-6/.ssh/authorized_keys" ] && ! grep -qE '^(useradd|usermod) ' "$work/d5/d6.out.stub.log"; then
+	ok '(D5) a $6$ hash is refused (only $2a$ and $argon2id$ are accepted)'
+else
+	no '(D5) a $6$ hash is refused (only $2a$ and $argon2id$ are accepted)'
+	sed 's/^/      | /' "$work/d5/d6.out" 2>/dev/null | head
+fi
+d5run "$work/d5/d2b.out" "$work/d5/d2b.conf" "$work/d5/home-2b" "$work/d5/sent-2b" ok
+if [ "$?" -ne 0 ] && grep -q 'must be a NetBSD pwhash(1) hash' "$work/d5/d2b.out" && \
+	[ -f "$work/d5/sent-2b" ] && [ ! -f "$work/d5/d2b.conf.done" ] && \
+	[ ! -f "$work/d5/home-2b/.ssh/authorized_keys" ] && ! grep -qE '^(useradd|usermod) ' "$work/d5/d2b.out.stub.log"; then
+	ok '(D5) a $2b$ hash is refused (only $2a$ and $argon2id$ are accepted)'
+else
+	no '(D5) a $2b$ hash is refused (only $2a$ and $argon2id$ are accepted)'
+	sed 's/^/      | /' "$work/d5/d2b.out" 2>/dev/null | head
+fi
+# a line that is not KEY=value (a PASSWORD_HASH: with a colon, or a
+# lowercase password_hash=) is refused on the first pass; the script reports
+# the line number only, so the hash content never reaches stdout, stderr or
+# the logger stub.
+cat > "$work/d5bin/logger" <<'LSEOF'
+#!/bin/sh
+# logger stub: drop the -t <tag>, record the message body only
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	-t) shift 2 ;;
+	*) shift ;;
+	esac
+done
+printf '%s\n' "$@" >> "$STUB_LOG" 2>/dev/null || true
+LSEOF
+chmod 755 "$work/d5bin/logger"
+# d5leak <name> <line>: a conf whose third line is <line> is refused on the
+# first pass, and the string SECRETSECRET appears in none of stdout, stderr
+# or the logger stub output
+d5leak() {
+	printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\n%s\n' "$key" "$2" > "$work/d5/dl-$1.conf"
+	d5run "$work/d5/dl-$1.out" "$work/d5/dl-$1.conf" "$work/d5/home-dl-$1" "$work/d5/sent-dl-$1" ok
+	_rc=$?
+	: >> "$work/d5/dl-$1.out.stub.log"
+	if [ "$_rc" -ne 0 ] && grep -q 'line 3' "$work/d5/dl-$1.out" && \
+		! grep -q 'SECRETSECRET' "$work/d5/dl-$1.out" "$work/d5/dl-$1.out.stub.log"; then
+		ok "(D5) a bad conf line ($1) is reported by line number only; SECRETSECRET is in no stdout, stderr or logger output"
+	else
+		no "(D5) a bad conf line ($1) is reported by line number only; SECRETSECRET is in no stdout, stderr or logger output (rc=$_rc)"
+		# the output is reported by line number only: it may hold the secret
+		grep -n 'SECRETSECRET' "$work/d5/dl-$1.out" "$work/d5/dl-$1.out.stub.log" 2>/dev/null | cut -d: -f1,2
+	fi
+}
+d5leak colon 'PASSWORD_HASH:$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE'
+d5leak lower 'password_hash=$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE'
+d5leak argoncolon 'PASSWORD_HASH:$argon2id$v=19$m=65536,t=3,p=4$SECRETSECRET$SECRETSECRET'
+# a conf with two PASSWORD_HASH lines is refused on the first pass (line
+# number only), before useradd(8) or usermod(8) is called
+printf 'USERNAME=dave\nSSH_KEY=ssh-ed25519 %s\nPASSWORD_HASH=%s\nPASSWORD_HASH=%s\n' "$key" \
+	'$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE' \
+	'$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSF' > "$work/d5/dtwo.conf"
+d5run "$work/d5/dtwo.out" "$work/d5/dtwo.conf" "$work/d5/home-two" "$work/d5/sent-two" ok
+_rc=$?
+: >> "$work/d5/dtwo.out.stub.log"
+if [ "$_rc" -ne 0 ] && grep -q 'line 4: a second PASSWORD_HASH line' "$work/d5/dtwo.out" && \
+	! grep -qE '^(useradd|usermod) ' "$work/d5/dtwo.out.stub.log" && \
+	! grep -q 'SECRETSECRET' "$work/d5/dtwo.out"; then
+	ok "(D5) a conf with two PASSWORD_HASH lines is refused before the account is touched"
+else
+	no "(D5) a conf with two PASSWORD_HASH lines is refused before the account is touched (rc=$_rc)"
+	grep -n 'SECRETSECRET' "$work/d5/dtwo.out" 2>/dev/null | cut -d: -f1
+fi
+d5leak wheel 'WHEEL=$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE'
+# a hash that is none of the accepted formats is refused on the first pass,
+# before the account is touched: the script fails and leaves the sentinel
+d5run "$work/d5/dbad.out" "$work/d5/dbad.conf" "$work/d5/home-bad" "$work/d5/sent-bad" fail
+if [ "$?" -ne 0 ] && [ -f "$work/d5/sent-bad" ] && [ ! -f "$work/d5/dbad.conf.done" ] && [ ! -f "$work/d5/home-bad/.ssh/authorized_keys" ]; then
+	ok "(D5) a password hash that is not one of the accepted formats is refused"
+else
+	no "(D5) a password hash that is not one of the accepted formats is refused"
+	sed 's/^/      | /' "$work/d5/dbad.out" 2>/dev/null | head
+fi
+# on error the hash is echoed by usermod(8), but to a throwaway stderr: it
+# is in the call record, never in the console or the log
+d5run "$work/d5/dred.out" "$work/d5/dred.conf" "$work/d5/home-red" "$work/d5/sent-red" fail
+if grep -Fq '$2a$06$REDACTEDREDACTEDREDACTEDREDACTED' "$work/d5/dred.out.stub.log" && \
+	! grep -Fq '$2a$06$REDACTEDREDACTEDREDACTEDREDACTED' "$work/d5/dred.out"; then
+	ok "(D5) the password hash is never written to the console or the log"
+else
+	no "(D5) the password hash is never written to the console or the log"
+	sed 's/^/      | /' "$work/d5/dred.out" 2>/dev/null | head
+fi
+
+# --- D7: build.sh bakes /etc/firstboot-user.conf from -u/-k/-H ------------
+# build.sh bakes the first-boot config from -u (the username) and -k (a file
+# of ssh public keys): USERNAME=USER, one SSH_KEY= line per non-empty,
+# non-comment line of the pubkey file. -H (a file of password hashes) adds
+# one PASSWORD_HASH= per non-empty, non-comment line. The conf is mode 0600,
+# because it may hold a password hash. The validation is done at the static
+# checks, in the dry run too, so a bad line is refused before the packages
+# are touched. The build here is the real build path against the fake src.
+mkdir -p "$work/src-d7"
+cp "$repo/tests/fixtures/fake-src-build.sh" "$work/src-d7/build.sh"
+chmod 755 "$work/src-d7/build.sh"
+# the ssh-ed25519 key is written via the printf argument (%s), not
+# concatenated in source, so the internal-references probe shape
+# (ssh-ed25519 space, key data) never matches a contiguous source key here
+key='AAAAC3NzaC1lZDI1NTE5AAAAI'
+# the pubkey file: one ssh public key per non-empty, non-comment line
+printf 'ssh-ed25519 %s\n' "$key" > "$work/d7.pubkey"
+# the hash file: one bare NetBSD pwhash(1) hash per non-empty, non-comment
+# line; build.sh prepends PASSWORD_HASH= to each.
+printf '$2a$06$abcdefghijklmnopqrstuv.Wxyzabcdefghijklmnopqr\n' > "$work/d7.hash"
+STUB_LOG="$work/stub-d7.log" STUB_REAL_TAR="$STUB_REAL_TAR" STUB_REAL_DD="$STUB_REAL_DD" \
+	FAKE_SETS_DIR="$sets" WTFBSD_TOOLDIR="$stubs" PATH="$stubs/bin:$PATH" \
+	WTFBSD_HOST_OS=NetBSD ROOTSIZE=64M ESPSIZE=16m \
+	sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7" -u dave -k "$work/d7.pubkey" -H "$work/d7.hash" > "$work/d7.log" 2>&1
+d7rc=$?
+d7conf="$work/out-d7/appliance/stage/etc/firstboot-user.conf"
+if [ "$d7rc" -eq 0 ] && [ -f "$d7conf" ] && \
+	[ "$(stat -c '%a' "$d7conf" 2>/dev/null || stat -f '%Lp' "$d7conf" 2>/dev/null)" = '600' ] && \
+	grep -q '^USERNAME=dave$' "$d7conf" && \
+	grep -q '^SSH_KEY=ssh-ed25519 ' "$d7conf" && \
+	grep -q '^PASSWORD_HASH=\$2a\$06\$' "$d7conf"; then
+	ok "(D7) build.sh bakes /etc/firstboot-user.conf (mode 0600) from -u/-k/-H"
+else
+	no "(D7) build.sh bakes /etc/firstboot-user.conf (mode 0600) from -u/-k/-H"
+	sed 's/^/      | /' "$work/d7.log" 2>/dev/null | head
+	[ -f "$d7conf" ] && sed 's/^/      /' "$d7conf"
+fi
+# the conf is recorded in the image metadata with the mode the build set on
+# it: 0600, because it is operator data that may hold a hash.
+if grep -qF './etc/firstboot-user.conf type=file mode=0600 uname=root gname=wheel' "$work/out-d7/appliance/metalog" 2>/dev/null; then
+	ok "(D7) the baked conf is recorded in the METALOG with mode 0600"
+else
+	no "(D7) the baked conf is recorded in the METALOG with mode 0600"
+fi
+# only one of -u and -k is not enough: the build refuses, the conf is not baked
+STUB_LOG="$work/stub-d7b.log" STUB_REAL_TAR="$STUB_REAL_TAR" STUB_REAL_DD="$STUB_REAL_DD" \
+	FAKE_SETS_DIR="$sets" WTFBSD_TOOLDIR="$stubs" PATH="$stubs/bin:$PATH" \
+	WTFBSD_HOST_OS=NetBSD ROOTSIZE=64M ESPSIZE=16m \
+	sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7b" -u dave > "$work/d7b.log" 2>&1
+if [ "$?" -ne 0 ] && grep -q -- '-u USER and -k PUBKEYFILE must be given together' "$work/d7b.log"; then
+	ok "(D7) -u without -k is refused"
+else
+	no "(D7) -u without -k is refused"
+	sed 's/^/      | /' "$work/d7b.log" 2>/dev/null | head
+fi
+# the static checks run in the dry run too: a bad username is refused
+# before anything is built.
+sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7d" -n -u 'BAD!' -k "$work/d7.pubkey" > "$work/d7d.log" 2>&1
+if [ "$?" -ne 0 ] && grep -q -- '-u: bad username' "$work/d7d.log"; then
+	ok "(D7) a bad username is refused in the dry run"
+else
+	no "(D7) a bad username is refused in the dry run"
+	sed 's/^/      | /' "$work/d7d.log" 2>/dev/null | head
+fi
+# a pubkey file that does not exist is refused, in the dry run too
+sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7e" -n -u dave -k "$work/no-such-key" > "$work/d7e.log" 2>&1
+if [ "$?" -ne 0 ] && grep -q -- 'no such pubkey file' "$work/d7e.log"; then
+	ok "(D7) a missing pubkey file is refused in the dry run"
+else
+	no "(D7) a missing pubkey file is refused in the dry run"
+	sed 's/^/      | /' "$work/d7e.log" 2>/dev/null | head
+fi
+# a bad hash in the -H file is refused, before any package is touched
+printf 'not-a-hash\n' > "$work/d7bad.hash"
+STUB_LOG="$work/stub-d7c.log" STUB_REAL_TAR="$STUB_REAL_TAR" STUB_REAL_DD="$STUB_REAL_DD" \
+	FAKE_SETS_DIR="$sets" WTFBSD_TOOLDIR="$stubs" PATH="$stubs/bin:$PATH" \
+	WTFBSD_HOST_OS=NetBSD ROOTSIZE=64M ESPSIZE=16m \
+	sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7c" -u dave -k "$work/d7.pubkey" -H "$work/d7bad.hash" > "$work/d7c.log" 2>&1
+d7c_rc=$?
+if [ "$d7c_rc" -ne 0 ] && grep -q -- 'the password hash must be a NetBSD pwhash(1) hash' "$work/d7c.log"; then
+	ok "(D7) a source file with a bad password hash is refused"
+else
+	no "(D7) a source file with a bad password hash is refused"
+	sed 's/^/      | /' "$work/d7c.log" 2>/dev/null | head
+fi
+
+# the -H file accepts only the NetBSD pwhash(1) formats $2a$ and
+# $argon2id$ (usermod(8) of NetBSD 11 refuses the others): a $6$ or a $2b$
+# hash is refused at the static checks, in the dry run too, and the line is
+# reported by its number only, so the hash never reaches stdout or stderr
+d7refuse() { # d7refuse <name> <hash line>
+	printf '%s\n' "$2" > "$work/d7-$1.hash"
+	sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7-$1" -n \
+		-u dave -k "$work/d7.pubkey" -H "$work/d7-$1.hash" > "$work/d7-$1.log" 2>&1
+	_rc=$?
+	if [ "$_rc" -ne 0 ] && grep -q 'line 1: the password hash must be a NetBSD pwhash(1) hash' "$work/d7-$1.log" && \
+		! grep -q 'SECRETSECRET' "$work/d7-$1.log"; then
+		ok "(D7) build.sh refuses a $1 hash in the -H file and never prints it"
+	else
+		no "(D7) build.sh refuses a $1 hash in the -H file and never prints it (rc=$_rc)"
+		grep -n 'SECRETSECRET' "$work/d7-$1.log" 2>/dev/null | cut -d: -f1
+	fi
+}
+d7refuse '$6$' '$6$rounds=5000$SECRETSECRET$SECRETSECRETSECRETSECRETSECRETSE'
+d7refuse '$2b$' '$2b$12$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE'
+# the account has one password: a -H file with two hash lines is refused,
+# by the line number of the second one, and neither hash is printed
+printf '%s\n' '$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE' \
+	'$2a$06$SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSF' > "$work/d7-two.hash"
+sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7-two" -n \
+	-u dave -k "$work/d7.pubkey" -H "$work/d7-two.hash" > "$work/d7-two.log" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] && grep -q 'line 2: a second password hash line' "$work/d7-two.log" && \
+	! grep -q 'SECRETSECRET' "$work/d7-two.log"; then
+	ok "(D7) a -H file with two hash lines is refused by line number"
+else
+	no "(D7) a -H file with two hash lines is refused by line number (rc=$_rc)"
+	grep -n 'SECRETSECRET' "$work/d7-two.log" 2>/dev/null | cut -d: -f1
+fi
+# a bad -k line is refused by its line number; its content (which may be a
+# private key pasted by mistake) never reaches stdout or stderr
+printf 'ssh-ed25519 %s\nSECRETSECRET not a public key\n' "$key" > "$work/d7-badkey.pub"
+sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7-badkey" -n \
+	-u dave -k "$work/d7-badkey.pub" > "$work/d7-badkey.log" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] && grep -q 'line 2 is not a supported ssh public key' "$work/d7-badkey.log" && \
+	! grep -q 'SECRETSECRET' "$work/d7-badkey.log"; then
+	ok "(D7) a bad -k line is refused by its line number and never printed"
+else
+	no "(D7) a bad -k line is refused by its line number and never printed (rc=$_rc)"
+	grep -n 'SECRETSECRET' "$work/d7-badkey.log" 2>/dev/null | cut -d: -f1
+fi
+# the baked conf is created under umask 077: a chmod(1) wrapper records the
+# mode of the conf at the moment build.sh calls chmod on it, before the
+# real chmod runs. The build runs under umask 022, so a conf written
+# without umask 077 is 0644 at that moment.
+mkdir -p "$work/d7wrap"
+STUB_REAL_CHMOD=$(command -v chmod)
+cat > "$work/d7wrap/chmod" <<'CHMODEOF'
+#!/bin/sh
+# chmod wrapper: record the mode of a firstboot-user.conf before chmod(1)
+for _a in "$@"; do _last=$_a; done
+case ${_last:-} in
+*/firstboot-user.conf)
+	_m=$(stat -c '%a' "$_last" 2>/dev/null || stat -f '%Lp' "$_last" 2>/dev/null)
+	printf 'before-chmod %s\n' "$_m" >> "$D7_CHMOD_LOG"
+	;;
+esac
+exec "$STUB_REAL_CHMOD" "$@"
+CHMODEOF
+"$STUB_REAL_CHMOD" 755 "$work/d7wrap/chmod"
+: > "$work/d7-chmod.log"
+(
+	umask 022
+	D7_CHMOD_LOG="$work/d7-chmod.log" STUB_REAL_CHMOD="$STUB_REAL_CHMOD" \
+		STUB_LOG="$work/stub-d7u.log" STUB_REAL_TAR="$STUB_REAL_TAR" STUB_REAL_DD="$STUB_REAL_DD" \
+		FAKE_SETS_DIR="$sets" WTFBSD_TOOLDIR="$stubs" PATH="$work/d7wrap:$stubs/bin:$PATH" \
+		WTFBSD_HOST_OS=NetBSD ROOTSIZE=64M ESPSIZE=16m \
+		sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-d7u" -u dave -k "$work/d7.pubkey" -H "$work/d7.hash"
+) > "$work/d7u.log" 2>&1
+d7u_rc=$?
+if [ "$d7u_rc" -eq 0 ] && [ -s "$work/d7-chmod.log" ] && \
+	! grep -qv '^before-chmod 600$' "$work/d7-chmod.log"; then
+	ok "(D7) the baked conf is already 0600 before the chmod (written under umask 077)"
+else
+	no "(D7) the baked conf is already 0600 before the chmod (written under umask 077) (rc=$d7u_rc)"
+	sed 's/^/      | /' "$work/d7-chmod.log" 2>/dev/null | head
+fi
+
+# --- D10: the build normalises the image sizes before makefs(1) ---------
+# makefs(1) wants the lowercase suffixes (12g, 64m). The build runs
+# ROOTSIZE and ESPSIZE through norm_size so that a "12G" on the command line
+# is not handed to makefs(8); the dry-run plan prints the normalised value.
+ROOTSIZE=12G sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-norm" -n \
+	> "$work/norm.log" 2>&1
+if grep -q -- 'rootsize: 12g' "$work/norm.log"; then
+	ok "(D10) build.sh normalises a 12G size to 12g before makefs"
+else
+	no "(D10) build.sh normalises a 12G size to 12g before makefs"
+	sed -n '1,20p' "$work/norm.log" 2>/dev/null | head
+fi
+
+# a bare suffix is not a size: ROOTSIZE=g is refused
+ROOTSIZE=g sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-norm-g" -n \
+	> "$work/norm-g.log" 2>&1
+if [ "$?" -ne 0 ] && grep -q 'ROOTSIZE must be digits with an optional single k/m/g suffix' "$work/norm-g.log"; then
+	ok "(D10) a bare size suffix (ROOTSIZE=g) is refused"
+else
+	no "(D10) a bare size suffix (ROOTSIZE=g) is refused"
+	sed -n '1,10p' "$work/norm-g.log" 2>/dev/null
+fi
+# norm_size accepts only the suffixes size_bytes reads (k, m, g): a b
+# suffix is refused
+ROOTSIZE=12b sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-norm-b" -n \
+	> "$work/norm-b.log" 2>&1
+if [ "$?" -ne 0 ] && grep -q 'ROOTSIZE is not a size like 12g (digits, optional single k/m/g suffix)' "$work/norm-b.log"; then
+	ok "(D10) a b size suffix (ROOTSIZE=12b) is refused"
+else
+	no "(D10) a b size suffix (ROOTSIZE=12b) is refused"
+	sed -n '1,10p' "$work/norm-b.log" 2>/dev/null
+fi
+# the nbmakefs stub refuses an uppercase size suffix exactly like the real
+# tool (strsuftoll(3) takes b/k/m/g/t/w in lower case), so the real build
+# cases above (ROOTSIZE=64M) prove the size is normalised before makefs
+STUB_LOG="$work/stub-mk12G.log" sh "$stubs/bin/nbmakefs" -t ffs -s 12G "$work/mk12G.img" "$work" > "$work/mk12G.out" 2>&1
+_rc=$?
+if [ "$_rc" -eq 1 ] && [ "$(cat "$work/mk12G.out")" = "nbmakefs: size '12G': illegal number" ]; then
+	ok "(D10) the nbmakefs stub refuses -s 12G like the real tool"
+else
+	no "(D10) the nbmakefs stub refuses -s 12G like the real tool (rc=$_rc)"
+	sed 's/^/      | /' "$work/mk12G.out"
+fi
+
+# --- D11: firstboot_user runs after the root filesystem is mounted ------
+# firstboot_user(8) edits files on the root filesystem, so it must run
+# after mountall(8) has mounted them read-write. The requirement is
+# "REQUIRE: NETWORKING mountall": FILESYSTEMS->mountall guarantees the root
+# is mounted, and NETWORKING is restored so the serial console is up.
+if grep -qE '^# REQUIRE: NETWORKING mountall[[:space:]]*$' \
+		"$repo/overlay/base/rootfs/etc/rc.d/firstboot_user"; then
+	ok "(D11) firstboot_user runs after mountall (REQUIRE: NETWORKING mountall)"
+else
+	no "(D11) firstboot_user runs after mountall (REQUIRE: NETWORKING mountall)"
+	sed -n '1,15p' "$repo/overlay/base/rootfs/etc/rc.d/firstboot_user" 2>/dev/null | head
+fi
+
+# --- D12: the build unpacks only the named kernel set -------------------
+# Every kern-<CONFIG> set holds ./netbsd: only the set named by KERNEL_SET
+# (default GENERIC) is unpacked, so /netbsd is the GENERIC kernel we boot
+# and not a later set's copy. With two kernel sets in the release, only the
+# GENERIC one is extracted, which the tar stub log shows.
+sets2="$work/sets2"
+mkdir -p "$sets2"
+"$STUB_REAL_TAR" -cJf "$sets2/base.tar.xz"      -C "$fakestage" .
+"$STUB_REAL_TAR" -cJf "$sets2/kern-GENERIC.tar.xz" -C "$fakestage" .
+"$STUB_REAL_TAR" -cJf "$sets2/kern-POWERPC.tar.xz" -C "$fakestage" .
+STUB_LOG="$work/stub-ks.log" STUB_REAL_TAR="$STUB_REAL_TAR" STUB_REAL_DD="$STUB_REAL_DD" \
+	FAKE_SETS_DIR="$sets2" WTFBSD_TOOLDIR="$stubs" PATH="$stubs/bin:$PATH" \
+	WTFBSD_HOST_OS=NetBSD ROOTSIZE=64M ESPSIZE=16m \
+	sh "$build" -c "$fixture" -s "$work/src-d7" -o "$work/out-ks" > "$work/ks.log" 2>&1
+if grep -q -- 'kern-GENERIC.tar.xz' "$work/stub-ks.log" && \
+	! grep -q -- 'kern-POWERPC.tar.xz' "$work/stub-ks.log"; then
+	ok "(D12) only the named kernel set (GENERIC) is unpacked, not a later set"
+else
+	no "(D12) only the named kernel set (GENERIC) is unpacked, not a later set"
+	sed -n '1,20p' "$work/ks.log" 2>/dev/null | head
+fi
+
 # --- M1: the metadata of the image ----------------------------------------
 # The METALOG of the upstream build describes the base system (the modes
 # of /tmp, of su and of everything else the release sets carry), and the
@@ -1187,6 +1752,7 @@ ln -s ../sbin "$fixture_repo/overlay/base/rootfs/usr/local/bin/examplebsd-pool-c
 		FAKE_SETS_DIR="$sets" \
 		WTFBSD_TOOLDIR="$stubs" \
 		PATH="$stubs/bin:$PATH" \
+		WTFBSD_HOST_OS=NetBSD \
 		ROOTSIZE=64M \
 		ESPSIZE=16m \
 		sh "$fixture_repo/build.sh" -c "$fixture" -s "$fakesrc" -o fixture-out
@@ -2004,6 +2570,19 @@ for spec in 'nbmakefs -Z' 'nbinstallboot -v' 'pkg_add -v' 'nbpwd_mkdb -v'; do
 	fi
 done
 
+# gpt(8) add takes -a <alignment> and -b <start>, each with an argument
+: > "$work/gpt-ab.img"
+STUB_LOG="$work/gpt-ab.log" sh "$stubs/bin/nbgpt" "$work/gpt-ab.img" create > /dev/null 2>&1
+STUB_LOG="$work/gpt-ab.log" sh "$stubs/bin/nbgpt" "$work/gpt-ab.img" add -a 1m -b 2048 -t efi -s 16m -i 1 -l esp > "$work/gpt-ab.out" 2>&1
+_ab=$?
+STUB_LOG="$work/gpt-ab.log" sh "$stubs/bin/nbgpt" "$work/gpt-ab.img" add -t efi -s 16m -a > "$work/gpt-ab2.out" 2>&1
+_ab2=$?
+if [ "$_ab" -eq 0 ] && [ "$_ab2" -ne 0 ] && grep -q 'option -a requires an argument' "$work/gpt-ab2.out"; then
+	ok "(D) nbgpt add takes -a <alignment> and -b <start> with an argument each"
+else
+	no "(D) nbgpt add takes -a <alignment> and -b <start> with an argument each (rc=$_ab/$_ab2)"
+	sed 's/^/      | /' "$work/gpt-ab.out" "$work/gpt-ab2.out"
+fi
 # nbgpt create must not truncate the image that dd wrote
 printf 'the disk image\n' > "$work/gpt-image.img"
 : > "$STUB_LOG"

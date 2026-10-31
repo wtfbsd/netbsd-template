@@ -75,6 +75,27 @@ The dry run changes nothing; always run it first. The real build needs an
 unmodified NetBSD source tree (`src/build.sh` must exist in it) and a
 `PKG_PATH` that points at a pkgsrc binary package repository.
 
+`build.sh` bakes `/etc/firstboot-user.conf` (mode 0600) from the command
+line, from `-u`/`-k`/`-H`:
+
+```sh
+./build.sh -c product.conf -u alice -k authorized_keys [-H hashes]
+```
+
+`-u USER` and `-k PUBKEYFILE` are a required pair. `-k` is a file of ssh
+public keys; `build.sh` writes `USERNAME=USER` and one `SSH_KEY=` line per
+non-empty, non-comment line of the file. `-H HASHFILE` (needs `-u`) is a file
+of password hashes; `build.sh` adds one `PASSWORD_HASH=` line per non-empty,
+non-comment line. Only `$2a$` and `$argon2id$` are accepted; a bad key or
+hash is refused, in the dry run too, before anything is built. Without `-u`
+the conf is not baked and the operator writes it by hand on the first boot.
+
+Knobs: `ROOTSIZE` (default `12g`), `ESPSIZE` (default `64m`),
+`KERNEL_SET` (the one kernel set unpacked, default `GENERIC`),
+`WTFBSD_NO_PACKAGES=yes` (skip the pkgsrc install on a non-NetBSD host),
+`WTFBSD_TOOLDIR` (where `nbmakefs`, `nbgpt`, `nbinstallboot` and
+`nbpwd_mkdb` are looked up, by default the tools directory of this build).
+
 ## How to test
 
 ```sh

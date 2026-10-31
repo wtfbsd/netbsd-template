@@ -13,13 +13,11 @@
 # "create" never truncates the image: the image is written by dd(1) and
 # the GPT is written into it.
 #
-# The options of gpt(8) are accepted: the global ones -r -v -s -p, and
-# the ones of the subcommands create, add, show, label and destroy. The
-# global options are marked as unverified in the round report: they come
-# from the gpt(8) manual page, not from a run of the tool. Any other
-# option is refused with "illegal option", so that a build that hands the
-# tool an option it does not have is caught here and not on the build
-# host.
+# The real command form is: nbgpt <device> <subcommand> [options...]; the
+# device comes first, and "show" takes only the device. Any argument the
+# command does not accept is refused with "illegal option" (create/add) so
+# that a build that hands the tool an option it does not have is caught
+# here and not on the build host.
 
 : "${STUB_LOG:?STUB_LOG must point at the stub log}"
 
@@ -37,6 +35,21 @@ needs_arg() {
 
 printf '%s\n' "nbgpt $*" >> "$STUB_LOG"
 
+# the real form is: nbgpt <device> <subcommand> [options...]. A leading
+# option is never valid, so it is refused as an illegal option here, exactly
+# as the other stubs refuse an option the command does not have.
+device=$1
+case $device in
+	-*) illegal "$1" ;;
+esac
+[ $# -ge 2 ] || {
+	printf '%s: expected <device> <subcommand>\n' "$PROG" >&2
+	exit 1
+}
+shift
+cmd=${1:-}
+[ $# -ge 1 ] && shift
+
 # to_blocks <size> — a size like 64m as a count of 512-byte blocks
 to_blocks() {
 	_s=$1
@@ -52,21 +65,8 @@ to_blocks() {
 	printf '%d\n' $((_s * _u / 512))
 }
 
-# the global options of gpt(8), before the subcommand
-while [ $# -gt 0 ]; do
-	case $1 in
-	-r | -v | -s | -p) shift ;;
-	-*) illegal "$1" ;;
-	*) break ;;
-	esac
-done
-
-cmd=${1:-}
-[ $# -gt 0 ] && shift
-
 case $cmd in
 create)
-	img=''
 	while [ $# -gt 0 ]; do
 		case $1 in
 		-s)
@@ -80,18 +80,16 @@ create)
 			illegal "$1"
 			;;
 		*)
-			img=$1
-			shift
+			printf '%s: %s: unexpected argument to create\n' "$PROG" "$1" >&2
+			exit 1
 			;;
 		esac
 	done
-	[ -n "$img" ] || exit 1
 	# the image is written by dd(1): it is never truncated here
-	[ -f "$img" ] || : > "$img"
-	: > "$img.gptstate"
+	[ -f "$device" ] || : > "$device"
+	: > "$device.gptstate"
 	;;
 add)
-	img=''
 	type=''
 	size=''
 	index=''
@@ -118,35 +116,43 @@ add)
 			label=${2:-}
 			shift 2
 			;;
-		-a | -b | -d | -f | -n | -r | -v | -p)
+		-a | -b)
+			# gpt(8) add: -a alignment and -b start each take an
+			# argument
+			[ $# -ge 2 ] || needs_arg "$1"
+			shift 2
+			;;
+		-f | -n | -r | -v | -p)
 			shift
 			;;
 		-*)
 			illegal "$1"
 			;;
 		*)
-			img=$1
-			shift
+			printf '%s: %s: unexpected argument to add\n' "$PROG" "$1" >&2
+			exit 1
 			;;
 		esac
 	done
-	[ -n "$img" ] || exit 1
 	blocks=$(to_blocks "${size:-0}") || exit 1
-	printf '%s\t%s\t%s\t%s\n' "${index:-0}" "$type" "$blocks" "${label:-}" >> "$img.gptstate"
+	printf '%s\t%s\t%s\t%s\n' "${index:-0}" "$type" "$blocks" "${label:-}" >> "$device.gptstate"
 	;;
 show)
-	img=''
-	for _a in "$@"; do
-		case $_a in
-		-p | -r | -v | -s) continue ;;
+	# show takes only the device: any option is refused
+	while [ $# -gt 0 ]; do
+		case $1 in
 		-*)
-			illegal "$_a"
+			illegal "$1"
+			;;
+		*)
+			printf '%s: %s: unexpected argument to show\n' "$PROG" "$1" >&2
+			exit 1
 			;;
 		esac
-		img=$_a
+		shift
 	done
-	[ -n "$img" ] || exit 1
-	state="$img.gptstate"
+	img="$device"
+	state="$device.gptstate"
 	[ -f "$state" ] || exit 1
 	bytes=$(wc -c < "$img" | tr -d ' ')
 	sectors=$((bytes / 512))
@@ -157,52 +163,55 @@ show)
 		printf '%12d %12d %6d  %s\n' 40 16 1 'PMBR'
 		printf '%12d %12d %6d  %s\n' 56 16 2 'Pri GPT header'
 		printf '%12d %12d %6d  %s\n' 72 512 3 'Pri GPT table'
-	} > "$img.gptshow"
+	} > "$device.gptshow"
 	cursor=584
 	while IFS='	' read -r index type blocks label; do
 		[ -n "$index" ] || continue
-		printf '%12d %12d %6d  %s\n' "$cursor" "$blocks" "$index" "${label:-$type}" >> "$img.gptshow"
+		printf '%12d %12d %6d  %s\n' "$cursor" "$blocks" "$index" "${label:-$type}" >> "$device.gptshow"
 		cursor=$((cursor + blocks))
 	done < "$state"
-	sed 's/^/gpt-show: /' "$img.gptshow" >> "$STUB_LOG"
-	cat "$img.gptshow"
+	sed 's/^/gpt-show: /' "$device.gptshow" >> "$STUB_LOG"
+	cat "$device.gptshow"
 	;;
 label)
-	img=''
-	label=''
 	while [ $# -gt 0 ]; do
 		case $1 in
 		-l)
 			[ $# -ge 2 ] || needs_arg "$1"
-			label=${2:-}
 			shift 2
 			;;
-		-n | -r | -v) shift ;;
-		-*) illegal "$1" ;;
-		*)
-			img=$1
+		-n | -r | -v)
 			shift
+			;;
+		-*)
+			illegal "$1"
+			;;
+		*)
+			printf '%s: %s: unexpected argument to label\n' "$PROG" "$1" >&2
+			exit 1
 			;;
 		esac
 	done
-	[ -n "$img" ] || exit 1
-	[ -f "$img.gptstate" ] || exit 1
-	printf '%s\n' "$label" >> "$img.gptstate"
+	[ -f "$device.gptstate" ] || exit 1
+	printf '%s\n' "$label" >> "$device.gptstate"
 	;;
 destroy)
-	img=''
 	while [ $# -gt 0 ]; do
 		case $1 in
-		-f | -n | -p | -r | -v) shift ;;
-		-*) illegal "$1" ;;
-		*)
-			img=$1
+		-f | -n | -p | -r | -v)
 			shift
+			;;
+		-*)
+			illegal "$1"
+			;;
+		*)
+			printf '%s: %s: unexpected argument to destroy\n' "$PROG" "$1" >&2
+			exit 1
 			;;
 		esac
 	done
-	[ -n "$img" ] || exit 1
-	rm -f "$img.gptstate" "$img.gptshow"
+	[ -n "$device" ] || exit 1
+	rm -f "$device.gptstate" "$device.gptshow"
 	;;
 *)
 	printf 'nbgpt: unknown subcommand: %s\n' "$cmd" >&2
