@@ -1182,7 +1182,10 @@ if [ -f "$fbhome/.ssh/authorized_keys" ] && [ "$keymode" = '600' ] && [ "$dirmod
 else
 	no "(C8) the SSH key of the first-boot user is installed with the mode 0600 in a 0700 .ssh (key=$keymode dir=$dirmode)"
 fi
-if grep -q -- "^chown alice $fbhome/.ssh $fbhome/.ssh/authorized_keys" "$work/fb-stub.log"; then
+# the keys go in while .ssh belongs to root, then .ssh and the file are
+# given to the user; chown -h never follows a symbolic link
+if grep -qx -- 'chown -h 0 .' "$work/fb-stub.log" &&
+	grep -qx -- 'chown -h alice authorized_keys .' "$work/fb-stub.log"; then
 	ok "(C8) the SSH key of the first-boot user belongs to that user"
 else
 	no "(C8) the SSH key of the first-boot user belongs to that user"
@@ -1233,6 +1236,60 @@ else
 	sed 's/^/      | /' "$work/fb-bad.log"
 fi
 
+# the SSH keys go into a home that may already exist. Whoever owns that
+# home can plant symbolic links in it; root must not write, chmod or
+# chown through them. A .ssh that is a link to a directory of root, and
+# an authorized_keys that is a link to a password file, are refused and
+# said, and the targets are left as they were.
+fbl="$work/fblink"
+mkdir -p "$fbl/rootdir" "$fbl/home-a" "$fbl/home-b/.ssh"
+printf 'root:*:0:0:the master password file stand-in:/root:/bin/sh\n' > "$fbl/master.passwd"
+cp "$fbl/master.passwd" "$fbl/master.passwd.orig"
+ln -s "$fbl/rootdir" "$fbl/home-a/.ssh"
+ln -s "$fbl/master.passwd" "$fbl/home-b/.ssh/authorized_keys"
+fblrun() { # fblrun <name> <home> — run the script once with that home
+	printf 'USERNAME=fbl%s\nSSH_KEY=ssh-ed25519 %s\n' "$1" 'fbldata' > "$fbl/$1.conf"
+	: > "$fbl/$1.sentinel"
+	: > "$fbl/$1.stub"
+	PATH="$work/bin:$PATH" \
+		STUB_LOG="$fbl/$1.stub" \
+		firstboot_user=YES \
+		firstboot_user_rcsubr="$stubs/rc.subr" \
+		firstboot_user_conf="$fbl/$1.conf" \
+		firstboot_user_sentinel="$fbl/$1.sentinel" \
+		firstboot_user_home="$2" \
+		sh "$stage/etc/rc.d/firstboot_user" start > "$fbl/$1.out" 2>&1
+	fblrc=$?
+}
+fblrun a "$fbl/home-a"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*home-a/.ssh is a symbolic link' "$fbl/a.out" &&
+	[ -z "$(ls -A "$fbl/rootdir")" ] && ! grep -q '^chown' "$fbl/a.stub"; then
+	ok "(C8) a .ssh that is a symbolic link is refused, and its target is untouched"
+else
+	no "(C8) a .ssh that is a symbolic link is refused, and its target is untouched (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/a.out"
+fi
+fblrun b "$fbl/home-b"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*authorized_keys is a symbolic link' "$fbl/b.out" &&
+	cmp -s "$fbl/master.passwd" "$fbl/master.passwd.orig" && ! grep -q '^chown' "$fbl/b.stub"; then
+	ok "(C8) an authorized_keys that is a symbolic link is refused, and the file it names is untouched"
+else
+	no "(C8) an authorized_keys that is a symbolic link is refused, and the file it names is untouched (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/b.out"
+fi
+
+# the home sits below a symbolic link nobody but its maker trusts
+mkdir -p "$fbl/elsewhere/home-p"
+ln -s "$fbl/elsewhere" "$fbl/plink"
+fblrun p "$fbl/plink/home-p"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*plink is a symbolic link that root does not own' "$fbl/p.out" &&
+	[ ! -e "$fbl/elsewhere/home-p/.ssh" ] && ! grep -q '^chown' "$fbl/p.stub"; then
+	ok "(C8) a home below a symbolic link root does not own is refused, and nothing is written through it"
+else
+	no "(C8) a home below a symbolic link root does not own is refused, and nothing is written through it (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/p.out"
+fi
+
 if grep -q -- 'rcvar=firstboot_user' "$stage/etc/rc.d/firstboot_user" &&
 	grep -q -- '^firstboot_user=YES$' "$stage/etc/rc.conf.d/firstboot_user"; then
 	ok "(C8) the first-boot script uses the NetBSD rc variable firstboot_user"
@@ -1277,7 +1334,14 @@ cat > "$work/d5bin/logger" <<'LOGBIN'
 printf 'logger: %s\n' "$*" >> "$STUB_LOG" 2>/dev/null || true
 exit 0
 LOGBIN
-chmod 755 "$work/d5bin/useradd" "$work/d5bin/usermod.fail" "$work/d5bin/usermod.ok" "$work/d5bin/logger"
+# chown(8): the script runs as root and gives .ssh to root while the
+# keys go in, then to the user; the suite runs without root
+cat > "$work/d5bin/chown" <<'CHEOF'
+#!/bin/sh
+printf '%s\n' "chown $*" >> "$STUB_LOG"
+exit 0
+CHEOF
+chmod 755 "$work/d5bin/useradd" "$work/d5bin/usermod.fail" "$work/d5bin/usermod.ok" "$work/d5bin/logger" "$work/d5bin/chown"
 # d5run <outfile> <conf> <home> <sentinel> <modustub-stem>: run firstboot_user
 d5run() {
 	_out=$1 _conf=$2 _home=$3 _sent=$4 _mod=$5
@@ -1667,7 +1731,7 @@ metalog="$out/appliance/metalog"
 
 # the mode of an entry of the spec, by its path
 spec_mode() { # spec_mode <path>
-	awk -v p="$1" '$1 == p {
+	p="$1" awk 'BEGIN { p = ENVIRON["p"] } $1 == p {
 		for (i = 2; i <= NF; i++) if ($i ~ /^mode=/) { print $i; exit }
 	}' "$metalog"
 }
@@ -2057,7 +2121,7 @@ fi
 # below knows the two kinds of line: the sh strings (''' ... ''') and the
 # Groovy around them.
 q3=$(printf '\047\047\047')
-badlines=$(awk -v q="$q3" '
+badlines=$(q="$q3" awk 'BEGIN { q = ENVIRON["q"] }
 	{
 		n = 0
 		rest = $0
@@ -2077,7 +2141,7 @@ fi
 
 # every sh ''' ... ''' block of the pipeline has to be a shell script that
 # parses: the pipeline is never run here, so this is the only check it gets
-awk -v q="$q3" '
+q="$q3" awk 'BEGIN { q = ENVIRON["q"] }
 	{
 		if (inside) {
 			if (index($0, q) > 0) {
@@ -2287,6 +2351,87 @@ else
 	no "(C1) the firmware is a boot ROM and the serial port has its LPC device"
 fi
 
+# (C9) the provider runs as root and keeps the state of the VMs in a
+#      directory. A fixed name in a shared temporary directory can be
+#      made first by another user, or be a symbolic link that user
+#      planted, and so can any directory above it: root would then write
+#      and remove where that user says. The default is a directory of
+#      root; a state directory that is a symbolic link, sits below a link
+#      root does not own or below a directory others can write to, or is
+#      writable by others itself, is refused; a new one is made 0700.
+#      Every case runs the provider itself.
+_sd="$work/statedir"
+rm -rf "$_sd"
+mkdir -p "$_sd/bin" "$_sd/target/victim" "$_sd/elsewhere/state/victim" "$_sd/openparent/state/victim" \
+	"$_sd/openself/victim"
+: > "$_sd/target/victim/keep"
+: > "$_sd/elsewhere/state/victim/keep"
+: > "$_sd/openparent/state/victim/keep"
+: > "$_sd/openself/victim/keep"
+: > "$_sd/image.img"
+: > "$_sd/firmware.fd"
+chmod 700 "$_sd/elsewhere/state" "$_sd/openparent/state"
+chmod 777 "$_sd/openparent" "$_sd/openself"
+printf '#!/bin/sh\nif [ "$1" = -u ]; then echo 0; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$_sd/bin/id"
+for _sdt in ifconfig sleep bhyve bhyvectl kldstat kldload; do
+	printf '#!/bin/sh\nexit 0\n' > "$_sd/bin/$_sdt"
+done
+chmod 755 "$_sd/bin/"*
+ln -s "$_sd/target" "$_sd/link"
+ln -s "$_sd/elsewhere" "$_sd/plink"
+_sdrun() { # _sdrun <log> <state dir> <command> <args...> — run the provider once
+	_sdlog=$1 _sddir=$2
+	shift 2
+	PATH="$_sd/bin:$PATH" WTFBSD_BHYVE_STATE="$_sddir" WTFBSD_BHYVE_CONSOLE="$_sddir" \
+		sh "$provider" "$@" > "$_sdlog" 2>&1
+	_sdrc=$?
+}
+_sdrun "$_sd/link.log" "$_sd/link" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/target/victim/keep" ] && grep -q 'it is a symbolic link' "$_sd/link.log"; then
+	ok "(C9) the provider refuses a state directory that is a symbolic link, and removes nothing through it"
+else
+	no "(C9) the provider refuses a state directory that is a symbolic link, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/link.log"
+fi
+_sdrun "$_sd/plink.log" "$_sd/plink/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/elsewhere/state/victim/keep" ] &&
+	grep -q 'plink is a symbolic link that root does not own' "$_sd/plink.log"; then
+	ok "(C9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it"
+else
+	no "(C9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/plink.log"
+fi
+_sdrun "$_sd/openparent.log" "$_sd/openparent/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openparent/state/victim/keep" ] &&
+	grep -q 'others can write to .*/openparent$' "$_sd/openparent.log"; then
+	ok "(C9) the provider refuses a state directory below a directory others can write to"
+else
+	no "(C9) the provider refuses a state directory below a directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openparent.log"
+fi
+_sdrun "$_sd/openself.log" "$_sd/openself" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openself/victim/keep" ] && grep -q 'others can write to it' "$_sd/openself.log"; then
+	ok "(C9) the provider refuses a state directory others can write to"
+else
+	no "(C9) the provider refuses a state directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openself.log"
+fi
+# create makes a new state directory 0700 (the run stops later, at the
+# serial device the test host does not have)
+_sdrun "$_sd/new.log" "$_sd/new/state" create probe "$_sd/image.img"
+_sdmode=$(ls -ld "$_sd/new/state" 2> /dev/null | cut -c1-10)
+if [ "$_sdmode" = 'drwx------' ]; then
+	ok "(C9) a new state directory of the provider is made 0700"
+else
+	no "(C9) a new state directory of the provider is made 0700 (got: $_sdmode)"
+	sed 's/^/      | /' "$_sd/new.log"
+fi
+if grep -q '/var/db/wtfbsd-vm' "$provider" && ! grep -q '/var/tmp/wtfbsd-vm' "$provider"; then
+	ok "(C9) the default state directory of the provider is a directory of root, not in /var/tmp"
+else
+	no "(C9) the default state directory of the provider is a directory of root, not in /var/tmp"
+fi
+
 # (C2) the pipeline names the boot-test VMs after the job and the build, and
 #      the boot test uses the name it is given
 if grep -q 'wtfbsd-vm-list' "$jenkins" && grep -q 'JOB_BASE_NAME' "$jenkins" &&
@@ -2359,7 +2504,7 @@ WTFBSD_FAKE_STATE="$work/ci-state" \
 WTFBSD_FAKE_LOG="$work/ci-serial.log" \
 WTFBSD_FAKE_SOURCE_LOG="$repo/tests/fixtures/serial-login.log" \
 WTFBSD_FAKE_ADDR=127.0.0.1 \
-WTFBSD_FAKE_SSH_PORT= \
+WTFBSD_FAKE_SSH_PORT='' \
 WTFBSD_BOOT_TIMEOUT=3 \
 WTFBSD_BOOT_SSH_PORT="$closed_port" \
 	sh "$boottest" "$ci_image" appliance > "$work/ci-sshd.log" 2>&1
