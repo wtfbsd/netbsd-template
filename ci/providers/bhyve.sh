@@ -42,7 +42,9 @@
 #   WTFBSD_BHYVE_BRIDGE    bridge the tap is attached to; without it the
 #                          guest has no network and "addr" finds no address
 #   WTFBSD_BHYVE_STATE     directory for the runtime state of the VMs
-#                          (default /var/tmp/wtfbsd-vm)
+#                          (default /var/db/wtfbsd-vm; it is made 0700, and
+#                          one that is a symbolic link, belongs to another
+#                          user or is writable by others is refused)
 #   WTFBSD_BHYVE_CONSOLE   directory for the pid files of the console
 #                          readers (default: the state directory)
 #   WTFBSD_BHYVE_DIRECT    set to 1 to boot the image in place instead of
@@ -56,7 +58,7 @@ CPUS=${WTFBSD_BHYVE_CPUS:-2}
 MEM=${WTFBSD_BHYVE_MEM:-2G}
 DISK=${WTFBSD_BHYVE_DISK:-16G}
 FIRMWARE=${WTFBSD_BHYVE_FIRMWARE-/usr/local/share/uefi-firmware/BHYVE_UEFI.fd}
-STATE=${WTFBSD_BHYVE_STATE:-/var/tmp/wtfbsd-vm}
+STATE=${WTFBSD_BHYVE_STATE:-/var/db/wtfbsd-vm}
 CONSOLE_DIR=${WTFBSD_BHYVE_CONSOLE:-$STATE}
 BRIDGE=${WTFBSD_BHYVE_BRIDGE:-}
 
@@ -95,6 +97,102 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 usage() {
 	log "usage: $PROG create NAME IMAGE | console NAME | addr NAME | destroy NAME" >&2
 	exit 2
+}
+
+# safe_ancestors <path> — can nobody but root (or the user that runs
+# this) redirect <path> through a directory above it? A check of the last
+# component alone is not enough: a symbolic link, or a directory another
+# user can write to, anywhere above it sends mkdir -p and every write
+# somewhere else. Two walks, from /:
+#   - the path as written: a component that is a symbolic link must
+#     belong to root (FreeBSD ships /home as a link of root to usr/home,
+#     which is fine; a link anyone else made is refused). The walk stops
+#     at the first component that does not exist yet.
+#   - the physical path of the deepest component that exists (cd -P):
+#     every directory must belong to root or to the user that runs this,
+#     and must not be writable by others unless it is sticky (/tmp).
+# Owner and mode are read with find(1) -user and -perm, which never
+# follow a link and need no parsing of ls(1). On a refusal _sa_why says
+# which component and why.
+safe_ancestors() { # safe_ancestors <path>
+	_sa_why=''
+	_sa_left=${1#/}
+	_sa_p=''
+	_sa_last=/
+	while :; do
+		case $_sa_left in
+		*/*)
+			_sa_c=${_sa_left%%/*}
+			_sa_left=${_sa_left#*/}
+			;;
+		*) break ;;
+		esac
+		[ -n "$_sa_c" ] || continue
+		_sa_p="$_sa_p/$_sa_c"
+		if [ -L "$_sa_p" ]; then
+			if [ -z "$(find "$_sa_p" -prune -user 0 -print 2> /dev/null)" ]; then
+				_sa_why="$_sa_p is a symbolic link that root does not own"
+				return 1
+			fi
+		elif [ ! -e "$_sa_p" ]; then
+			break
+		fi
+		_sa_last=$_sa_p
+	done
+	if ! _sa_phys=$(cd -P "$_sa_last" 2> /dev/null && pwd -P); then
+		_sa_why="$_sa_last cannot be entered"
+		return 1
+	fi
+	_sa_d=/
+	_sa_left=${_sa_phys#/}
+	while :; do
+		if ! [ -O "$_sa_d" ] && [ -z "$(find "$_sa_d" -prune -user 0 -print 2> /dev/null)" ]; then
+			_sa_why="$_sa_d belongs to neither root nor the user that runs this"
+			return 1
+		fi
+		if [ -n "$(find "$_sa_d" -prune -perm -0002 ! -perm -1000 -print 2> /dev/null)" ]; then
+			_sa_why="others can write to $_sa_d"
+			return 1
+		fi
+		[ -n "$_sa_left" ] || break
+		_sa_c=${_sa_left%%/*}
+		case $_sa_left in
+		*/*) _sa_left=${_sa_left#*/} ;;
+		*) _sa_left='' ;;
+		esac
+		_sa_d="${_sa_d%/}/$_sa_c"
+	done
+	return 0
+}
+
+# private_dir <dir> <create|check> — the state of the VMs lives in a
+# directory only the provider can write: it runs as root, and a path that
+# another user could create first, or turn into a symbolic link, would
+# let that user choose where root writes and what it removes. Every
+# directory above it is checked first (safe_ancestors). With create, a
+# missing directory is made 0700; with check, a missing one is left
+# alone (there is nothing in it to read or remove). A directory that is
+# there must not be a symbolic link, must belong to the user that runs
+# the provider (root) and must not be writable by others (find -perm
+# -0002 reads the mode bit itself): anything else is refused, never
+# repaired.
+private_dir() { # private_dir <dir> <create|check>
+	_pd=$1
+	case $_pd in
+	/*) ;;
+	*) die "the state directory must be an absolute path: $_pd" ;;
+	esac
+	safe_ancestors "$_pd" || die "refusing the state directory $_pd: $_sa_why"
+	if [ ! -e "$_pd" ] && [ ! -L "$_pd" ]; then
+		[ "$2" = create ] || return 0
+		(umask 077 && mkdir -p "$_pd") || die "cannot create the state directory $_pd"
+	fi
+	[ ! -L "$_pd" ] || die "refusing the state directory $_pd: it is a symbolic link"
+	[ -d "$_pd" ] || die "refusing the state directory $_pd: it is not a directory"
+	[ -O "$_pd" ] || die "refusing the state directory $_pd: it does not belong to the user that runs the provider"
+	if [ -n "$(find "$_pd" -prune -perm -0002 -print)" ]; then
+		die "refusing the state directory $_pd: others can write to it"
+	fi
 }
 
 # rm -rf only below the state directory, never the state directory itself
@@ -156,6 +254,12 @@ if [ "$cmd" != unit ]; then
 	[ "$(id -u)" -eq 0 ] || die 'the bhyve provider needs root (bhyve(8), nmdm(4) and tap(4))'
 fi
 
+# every command but unit reads or removes the state
+if [ "$cmd" != unit ] && [ "$cmd" != create ]; then
+	private_dir "$STATE" check
+	private_dir "$CONSOLE_DIR" check
+fi
+
 case $cmd in
 unit)
 	# the null-modem pair and the tap of a VM: the devices it would
@@ -173,6 +277,8 @@ create)
 	case $image in
 	*,*) die "the image path must not hold a comma: $image" ;;
 	esac
+	private_dir "$STATE" create
+	private_dir "$CONSOLE_DIR" create
 	dir=$(vmdir "$name")
 	mkdir -p "$dir"
 	mac=$(mac_of "$name")

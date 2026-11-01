@@ -47,6 +47,7 @@ load_rc_config() {
 		. /etc/rc.conf
 	fi
 	if [ -f "/etc/rc.conf.d/$_command" ]; then
+		# shellcheck source=/dev/null
 		. "/etc/rc.conf.d/$_command"
 	fi
 	return 0

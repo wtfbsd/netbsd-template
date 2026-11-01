@@ -589,7 +589,7 @@ are never rebuilt from the files of this build."
 	# 1. the base system, without the entries of the paths the overlay
 	#    replaces. The raw spec is ordered below, after everything has
 	#    been gathered, so that it only has to be sorted once.
-	awk -v ovl="$_ovl" '
+	ovl="$_ovl" awk 'BEGIN { ovl = ENVIRON["ovl"] }
 		BEGIN { while ((getline l < ovl) > 0) drop[l] = 1 }
 		{ if (!($1 in drop)) {
 			# build.sh rewrites some base files (etc/master.passwd,
@@ -624,8 +624,8 @@ are never rebuilt from the files of this build."
 	#    never carry group/other write.
 	awk '{ print $1 }' "$_base" | LC_ALL=C sort -u > "$_out.base"
 	find "$_stage" | LC_ALL=C sort |
-		awk -v s="$_stage" '{ print "." substr($0, length(s) + 1) }' > "$_out.stage"
-	awk -v base="$_out.base" -v ovl="$_ovl" '
+		s="$_stage" awk 'BEGIN { s = ENVIRON["s"] } { print "." substr($0, length(s) + 1) }' > "$_out.stage"
+	base="$_out.base" ovl="$_ovl" awk 'BEGIN { base = ENVIRON["base"]; ovl = ENVIRON["ovl"] }
 		BEGIN {
 			while ((getline l < base) > 0) known[l] = 1
 			while ((getline l < ovl) > 0) known[l] = 1
@@ -704,7 +704,7 @@ gpt_offset() { # gpt_offset <gpt-show-file> <index> — the start of a partition
 	# the first rows of a gpt(8) listing are the PMBR, the primary GPT
 	# header and the primary GPT table, and their index column holds
 	# numbers of its own.
-	awk -v want="$2" '
+	want="$2" awk 'BEGIN { want = ENVIRON["want"] }
 		$1 ~ /^[0-9]+$/ && $3 == want && $4 !~ /^(PMBR|Pri)$/ { print $1; exit }
 	' "$1"
 }

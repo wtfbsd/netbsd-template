@@ -1,0 +1,10 @@
+# class-checks allow-list (agents/tools/class-checks): CLASS PATH:LINE REASON
+eval-nonliteral tests/stubs/rc.subr:34 the copy of the checkyesno lookup of the NetBSD rc.subr, on a variable name the test passes
+shellcheck ci/providers/bhyve.sh:149 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck ci/providers/bhyve.sh:192 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck overlay/base/rootfs/etc/rc.d/firstboot_user:156 the script runs as root under the BSD /bin/sh, whose test has -O
+shellcheck tests/stubs/rc.subr:35 _value is assigned by the eval on the line above
+tmp-predictable tests/run-tests.sh:2429 a grep pattern that checks the old default state path is gone, nothing is written there
+unquoted-expansion build.sh:1005 pkgs is the package names of the packages.list files, one word each, split on purpose
+unquoted-expansion build.sh:1007 pkgs is the package names of the packages.list files, one word each, split on purpose
+unquoted-expansion tests/stubs/rc.subr:34 the copy of the checkyesno lookup of the NetBSD rc.subr, on a variable name the test passes

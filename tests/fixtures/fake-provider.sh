@@ -24,8 +24,10 @@
 
 set -eu
 
-STATE=${WTFBSD_FAKE_STATE:-/tmp/fake-provider.state}
-LOG=${WTFBSD_FAKE_LOG:-/tmp/fake-provider.serial}
+# no default in a shared temporary directory: the suite names both files
+# (it makes them under its own mktemp -d directory)
+STATE=${WTFBSD_FAKE_STATE:?set WTFBSD_FAKE_STATE to the file of the calls}
+LOG=${WTFBSD_FAKE_LOG:?set WTFBSD_FAKE_LOG to the file of the serial log}
 ADDR=${WTFBSD_FAKE_ADDR:-127.0.0.1}
 
 cmd=${1:-}
